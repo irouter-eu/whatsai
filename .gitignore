@@ -10,7 +10,7 @@
 __pycache__/
 *.pyc
 
-# Local agent/editor tooling and planning artifacts
+# Local agent/editor tooling and planning artifacts (marketplace manifests stay tracked)
 .claude/
-.agents/
+.agents/skills/
 openspec/

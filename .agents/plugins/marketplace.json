@@ -1,0 +1,19 @@
+{
+  "name": "whatsai",
+  "interface": {
+    "displayName": "WhatsAI"
+  },
+  "plugins": [
+    {
+      "name": "whatsai",
+      "source": {
+        "source": "local",
+        "path": "./plugins/whatsai"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -85,6 +85,22 @@ Code moves through the existing Git remote. An explicit handoff acceptance fetch
 
 The [plugin bundle](plugins/whatsai) contains manifests for both harnesses and an MCP definition using `whatsai-mcp`. The MCP process inherits `WHATSAI_STATE`; set it before launching your harness. Agent-created content is always labelled agent through MCP.
 
+This repository is also a plugin marketplace for both harnesses. Installing the plugin registers the skills and the MCP server; it does not build or install the daemon, so complete the build and `npm install -g ./adapters` steps above first so that `whatsai-mcp` and the three executables are on your PATH.
+
+Claude Code:
+
+```sh
+claude plugin marketplace add irouter-eu/whatsai
+claude plugin install whatsai@whatsai
+```
+
+Codex:
+
+```sh
+codex plugin marketplace add irouter-eu/whatsai
+codex plugin add whatsai@whatsai
+```
+
 For Codex, the verified CLI supports registering the MCP server:
 
 ```sh

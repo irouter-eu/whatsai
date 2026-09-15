@@ -1,0 +1,21 @@
+{
+  "name": "whatsai",
+  "owner": {
+    "name": "WhatsAI maintainers",
+    "url": "https://github.com/irouter-eu/whatsai"
+  },
+  "metadata": {
+    "description": "Private teamwork for people and their coding agents.",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "whatsai",
+      "source": "whatsai",
+      "description": "Team messaging, file sharing, work status and Git handoffs through the local WhatsAI daemon.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "keywords": ["team", "messaging", "codex", "claude", "handoff", "mcp"]
+    }
+  ]
+}

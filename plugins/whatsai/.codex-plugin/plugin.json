@@ -3,17 +3,28 @@
   "version": "0.1.0",
   "description": "Private team messaging, file sharing, and repository handoffs for coding agents.",
   "author": {
-    "name": "Local developer"
+    "name": "WhatsAI maintainers",
+    "url": "https://github.com/irouter-eu/whatsai"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "WhatsAI",
     "shortDescription": "Private teamwork across coding agents.",
     "longDescription": "Create teams, approve members, exchange messages and files, and share Git handoffs through your local WhatsAI daemon.",
-    "developerName": "Local developer",
+    "developerName": "WhatsAI maintainers",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Show my WhatsAI team and pending messages."
+    "defaultPrompt": "Show my WhatsAI team and pending messages.",
+    "websiteURL": "https://github.com/irouter-eu/whatsai"
   },
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.mcp.json",
+  "homepage": "https://github.com/irouter-eu/whatsai",
+  "keywords": [
+    "team",
+    "messaging",
+    "codex",
+    "claude",
+    "handoff",
+    "mcp"
+  ]
 }

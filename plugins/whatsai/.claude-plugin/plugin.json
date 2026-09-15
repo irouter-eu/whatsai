@@ -1,5 +1,19 @@
 {
   "name": "whatsai",
   "version": "0.1.0",
-  "description": "Private teamwork for people and coding agents"
+  "description": "Private teamwork for people and coding agents",
+  "author": {
+    "name": "WhatsAI maintainers",
+    "url": "https://github.com/irouter-eu/whatsai"
+  },
+  "homepage": "https://github.com/irouter-eu/whatsai",
+  "repository": "https://github.com/irouter-eu/whatsai",
+  "keywords": [
+    "team",
+    "messaging",
+    "codex",
+    "claude",
+    "handoff",
+    "mcp"
+  ]
 }
