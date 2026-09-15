@@ -1,0 +1,5 @@
+# For iroh-relay 1.2.0. Use a dedicated relay hostname/TLS configuration
+# following the upstream server documentation before exposing publicly.
+http_bind_addr = "127.0.0.1:8788"
+enable_relay = true
+enable_quic_addr_discovery = false

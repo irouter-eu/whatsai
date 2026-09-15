@@ -1,0 +1,21 @@
+{
+  "name": "@whatsai/adapters",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^22.0.0"
+  },
+  "bin": {
+    "whatsai-mcp": "dist/mcp.js"
+  }
+}

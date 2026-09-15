@@ -1,0 +1,19 @@
+{
+  "name": "whatsai",
+  "version": "0.1.0",
+  "description": "Private team messaging, file sharing, and repository handoffs for coding agents.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "WhatsAI",
+    "shortDescription": "Private teamwork across coding agents.",
+    "longDescription": "Create teams, approve members, exchange messages and files, and share Git handoffs through your local WhatsAI daemon.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Show my WhatsAI team and pending messages."
+  },
+  "mcpServers": "./.mcp.json"
+}

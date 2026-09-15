@@ -1,0 +1,32 @@
+[package]
+name = "whatsai-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+rusqlite = { version = "0.38", features = ["bundled"] }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rand = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+# Pinned: 0.12 shares rand_core with rand 0.8; newer releases mix incompatible RNG traits.
+hpke = { version = "=0.12.0", features = ["x25519", "std"] }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+fs2 = "0.4"
+libc = "0.2"
+# Pinned to the tested endpoint/relay API; bump together with the iroh-relay dev-dependency.
+iroh = "=1.2.0"
+
+[dev-dependencies]
+iroh-relay = { version = "=1.2.0", features = ["server"] }
+tempfile = "3"

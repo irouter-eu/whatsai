@@ -1,0 +1,16 @@
+/target/
+**/node_modules/
+/adapters/dist/
+.whatsai/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+
+__pycache__/
+*.pyc
+
+# Local agent/editor tooling and planning artifacts
+.claude/
+.agents/
+openspec/
