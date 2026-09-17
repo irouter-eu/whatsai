@@ -1,15 +1,46 @@
 use crate::{client::Client, protocol::*, storage};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use std::{os::unix::fs::PermissionsExt, path::Path, rc::Rc, time::Duration};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    rc::Rc,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     sync::{Mutex, watch},
 };
 
+/// Bytes available for a Unix socket path, excluding the terminator.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd"
+))]
+pub const MAX_SOCKET_PATH: usize = 103;
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd"
+)))]
+pub const MAX_SOCKET_PATH: usize = 107;
+
+/// The daemon socket lives beside the state; the kernel limits its full path length.
+pub fn socket_path(state: &Path) -> Result<PathBuf> {
+    let path = state.join("daemon.sock");
+    let len = path.as_os_str().len();
+    ensure!(
+        len <= MAX_SOCKET_PATH,
+        "state directory path is too long for a Unix socket ({len} bytes, limit {MAX_SOCKET_PATH}); choose a shorter WHATSAI_STATE"
+    );
+    Ok(path)
+}
 pub async fn request(state: &Path, command: Value) -> Result<Value> {
-    let stream = UnixStream::connect(state.join("daemon.sock"))
+    let stream = UnixStream::connect(socket_path(state)?)
         .await
         .context("daemon unavailable; start whatsai-daemon for this state directory")?;
     let (mut read, mut write) = stream.into_split();
@@ -34,6 +65,7 @@ pub async fn run(state: &Path, name: &str) -> Result<()> {
         .await
 }
 async fn run_local(state: &Path, name: &str) -> Result<()> {
+    let path = socket_path(state)?;
     let _lock = storage::lock(state)?;
     let mut initial = Client::open(state, name)?;
     let relay = std::env::var("WHATSAI_RELAY").ok();
@@ -41,7 +73,6 @@ async fn run_local(state: &Path, name: &str) -> Result<()> {
     initial.endpoint = Some(endpoint.clone());
     initial.set("endpoint", &serde_json::to_string(&endpoint.addr())?)?;
     let client = Rc::new(Mutex::new(initial));
-    let path = state.join("daemon.sock");
     if path.exists() {
         std::fs::remove_file(&path)?;
     }
