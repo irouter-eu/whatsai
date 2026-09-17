@@ -101,7 +101,7 @@ codex plugin marketplace add irouter-eu/whatsai
 codex plugin add whatsai@whatsai
 ```
 
-For Codex, the verified CLI supports registering the MCP server:
+Alternatively, for MCP-only access in Codex without installing the plugin or its skills:
 
 ```sh
 codex mcp add whatsai -- whatsai-mcp
@@ -116,6 +116,12 @@ claude --plugin-dir ./plugins/whatsai
 ```
 
 The plugin supplies skills such as `/whatsai:create`, `/whatsai:join`, `/whatsai:requests`, `/whatsai:approve`, `/whatsai:send`, and `/whatsai:inbox`. Plugin loading depends on the installed harness's plugin support; the CLI is the stable fallback.
+
+### ChatGPT
+
+Where workspace marketplace import is available, an admin can open **Admin > Plugins > Add > Import marketplace** and enter `https://github.com/irouter-eu/whatsai`, leaving Path empty. OpenAI supports this repository's marketplace format, but imported plugins declaring MCP servers are **desktop only**. The local WhatsAI runtime and `whatsai-mcp` must still be installed and available to the desktop app. This path has not yet been tested end to end with WhatsAI. See [OpenAI's marketplace import documentation](https://learn.chatgpt.com/docs/enterprise/plugin-management).
+
+For ChatGPT web, marketplace import alone does not connect the local daemon. Developer mode supports connecting an MCP server through a public HTTPS endpoint or Secure MCP Tunnel; the tunnel can target a local stdio server such as `whatsai-mcp`. WhatsAI currently ships only the stdio adapter, with no bundled tunnel setup or authenticated HTTP endpoint. Availability depends on account and workspace policy. See [OpenAI's MCP connection documentation](https://developers.openai.com/plugins/deploy/connect-chatgpt).
 
 ### Optional automatic replies
 
