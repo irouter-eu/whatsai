@@ -1,10 +1,11 @@
-use crate::{client::Client, protocol::*, storage};
+use crate::{client::Client, protocol::*, service::Service, storage};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -69,9 +70,31 @@ async fn run_local(state: &Path, name: &str) -> Result<()> {
     let _lock = storage::lock(state)?;
     let mut initial = Client::open(state, name)?;
     let relay = std::env::var("WHATSAI_RELAY").ok();
-    let endpoint = crate::transport::bind(&initial.identity, relay.as_deref()).await?;
+    let remembered: u16 = initial
+        .config("udp_port")?
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    let endpoint =
+        match crate::transport::bind_with(&initial.identity, relay.as_deref(), false, remembered)
+            .await
+        {
+            Ok(endpoint) => endpoint,
+            Err(error) if remembered != 0 => {
+                eprintln!("UDP port {remembered} unavailable ({error:#}); binding a new one");
+                crate::transport::bind(&initial.identity, relay.as_deref()).await?
+            }
+            Err(error) => return Err(error),
+        };
+    if let Some(port) = crate::transport::bound_port(&endpoint) {
+        initial.set("udp_port", &port.to_string())?;
+    }
     initial.endpoint = Some(endpoint.clone());
     initial.set("endpoint", &serde_json::to_string(&endpoint.addr())?)?;
+    let quota = std::env::var("WHATSAI_QUOTA_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024 * 1024 * 1024);
+    initial.authority = Some(Arc::new(Service::open(&state.join("authority"), quota)?));
     let client = Rc::new(Mutex::new(initial));
     if path.exists() {
         std::fs::remove_file(&path)?;
@@ -116,11 +139,18 @@ async fn run_local(state: &Path, name: &str) -> Result<()> {
           if let Some(incoming)=incoming {
            let client=client.clone();
            tokio::task::spawn_local(async move{
-            let _=tokio::time::timeout(Duration::from_secs(15),async{
+            let _=tokio::time::timeout(Duration::from_secs(60),async{
              let connection=incoming.await?;
              let(mut send,mut recv)=connection.accept_bi().await?;
              let result=async {
               let body=recv.read_to_end(MAX_FRAME).await?;let request:Value=serde_json::from_slice(&body)?;
+              if request["method"]=="rpc" {
+               // Authority operations are self-authenticating signed requests; the service verifies them.
+               let req:Signed<Request>=serde_json::from_value(request["request"].clone())?;
+               let service={let c=client.lock().await;c.authority.clone().context("authority unavailable")?};
+               let result=tokio::task::spawn_blocking(move||service.handle(req)).await??;
+               return Ok::<_,anyhow::Error>(json!({"ok":true,"result":result}));
+              }
               if request["method"]=="fetch_chunk" {
                let req:Signed<Request>=serde_json::from_value(request["request"].clone())?;crate::crypto::verify(&req)?;
                ensure!(req.body.version==VERSION && now().abs_diff(req.body.timestamp)<=300,"stale peer request");

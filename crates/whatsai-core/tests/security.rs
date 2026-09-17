@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use whatsai_core::{crypto::*, governance::*, protocol::*, service::Service, storage};
+const SECRET: &str = "7f3a9c1e5b2d8e4f6a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e1f";
 
 fn create(a: &Identity, team: &str) -> Signed<Governance> {
     a.sign(Governance {
@@ -80,7 +81,12 @@ fn promoted_admin_can_admit_without_creator_and_last_admin_is_protected() {
     let c = Identity::generate("Charlie");
     let tid = id();
     let mut t: Team = serde_json::from_value(
-        call(&s, &a, json!({"method":"create","record":create(&a,&tid)})).unwrap(),
+        call(
+            &s,
+            &a,
+            json!({"method":"create","record":create(&a,&tid),"secret":SECRET}),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert!(call(&s, &b, json!({"method":"team","team":tid})).is_err());
@@ -88,7 +94,7 @@ fn promoted_admin_can_admit_without_creator_and_last_admin_is_protected() {
         call(
             &s,
             &b,
-            json!({"method":"request_join","team":tid,"member":b.member().unwrap()})
+            json!({"method":"request_join","team":tid,"member":b.member().unwrap(),"secret":SECRET})
         )
         .unwrap()["state"],
         "pending"
@@ -121,7 +127,7 @@ fn promoted_admin_can_admit_without_creator_and_last_admin_is_protected() {
     call(
         &s,
         &c,
-        json!({"method":"request_join","team":tid,"member":c.member().unwrap()}),
+        json!({"method":"request_join","team":tid,"member":c.member().unwrap(),"secret":SECRET}),
     )
     .unwrap();
     let admit = change(&b, &t, "admit", Some(c.member().unwrap()), None);
@@ -222,13 +228,18 @@ fn replay_expiry_conflicts_and_revocation_are_enforced() {
     let c = Identity::generate("Charlie");
     let tid = id();
     let mut t: Team = serde_json::from_value(
-        call(&s, &a, json!({"method":"create","record":create(&a,&tid)})).unwrap(),
+        call(
+            &s,
+            &a,
+            json!({"method":"create","record":create(&a,&tid),"secret":SECRET}),
+        )
+        .unwrap(),
     )
     .unwrap();
     call(
         &s,
         &b,
-        json!({"method":"request_join","team":tid,"member":b.member().unwrap()}),
+        json!({"method":"request_join","team":tid,"member":b.member().unwrap(),"secret":SECRET}),
     )
     .unwrap();
     let approval = change(&a, &t, "admit", Some(b.member().unwrap()), None);
@@ -271,7 +282,7 @@ fn replay_expiry_conflicts_and_revocation_are_enforced() {
     call(
         &s,
         &c,
-        json!({"method":"request_join","team":tid,"member":c.member().unwrap()}),
+        json!({"method":"request_join","team":tid,"member":c.member().unwrap(),"secret":SECRET}),
     )
     .unwrap();
     let db = rusqlite::Connection::open(tmp.path().join("service.db")).unwrap();
@@ -463,7 +474,7 @@ fn concurrent_approvals_admit_once() {
         call(
             &service,
             &admin,
-            json!({"method":"create","record":create(&admin,&tid)}),
+            json!({"method":"create","record":create(&admin,&tid),"secret":SECRET}),
         )
         .unwrap(),
     )
@@ -471,7 +482,7 @@ fn concurrent_approvals_admit_once() {
     call(
         &service,
         &applicant,
-        json!({"method":"request_join","team":tid,"member":applicant.member().unwrap()}),
+        json!({"method":"request_join","team":tid,"member":applicant.member().unwrap(),"secret":SECRET}),
     )
     .unwrap();
     let approval = change(&admin, &t, "admit", Some(applicant.member().unwrap()), None);
@@ -509,7 +520,7 @@ fn storage_quota_and_expiry_are_explicit() {
         call(
             &service,
             &admin,
-            json!({"method":"create","record":create(&admin,&tid)}),
+            json!({"method":"create","record":create(&admin,&tid),"secret":SECRET}),
         )
         .unwrap(),
     )
@@ -599,4 +610,49 @@ async fn hung_worker_is_timed_out() {
             .to_string()
             .contains("timed out")
     );
+}
+
+#[test]
+fn network_secret_gates_join_requests() {
+    let tmp = TempDir::new().unwrap();
+    let s = Service::open(tmp.path(), 20_000_000).unwrap();
+    let a = Identity::generate("Founder");
+    let b = Identity::generate("Applicant");
+    let tid = id();
+    assert!(
+        call(
+            &s,
+            &a,
+            json!({"method":"create","record":create(&a,&tid),"secret":"short"})
+        )
+        .is_err(),
+        "malformed secrets are refused at creation"
+    );
+    call(
+        &s,
+        &a,
+        json!({"method":"create","record":create(&a,&tid),"secret":SECRET}),
+    )
+    .unwrap();
+    let wrong = SECRET.replace('7', "8");
+    for bad in [json!(wrong), json!(""), Value::Null] {
+        let err = call(
+            &s,
+            &b,
+            json!({"method":"request_join","team":tid,"member":b.member().unwrap(),"secret":bad}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("network secret rejected"), "{err}");
+    }
+    assert_eq!(
+        call(
+            &s,
+            &b,
+            json!({"method":"request_join","team":tid,"member":b.member().unwrap(),"secret":SECRET})
+        )
+        .unwrap()["state"],
+        "pending"
+    );
+    assert!(secret_matches(SECRET, SECRET) && !secret_matches(SECRET, &wrong));
 }

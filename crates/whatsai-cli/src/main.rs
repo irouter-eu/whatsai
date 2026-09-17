@@ -37,14 +37,14 @@ enum Command {
         #[arg(long)]
         directory: PathBuf,
     },
+    /// Create a team; this daemon becomes the network's authority.
     Create {
-        #[arg(long)]
-        service: String,
         #[arg(long)]
         repository: String,
     },
+    /// Request admission with a join key from an existing member.
     Join {
-        descriptor: String,
+        key: String,
     },
     JoinStatus,
     Approve {
@@ -154,6 +154,8 @@ async fn main() -> anyhow::Result<()> {
                 .append(true)
                 .mode(0o600)
                 .open(state.join("daemon.log"))?;
+            let log_path = state.join("daemon.log");
+            let written_before = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
             let binary = std::env::current_exe()?.with_file_name("whatsai-daemon");
             let mut child = std::process::Command::new(binary)
                 .args([
@@ -177,12 +179,10 @@ async fn main() -> anyhow::Result<()> {
                 }
                 if let Some(status) = child.try_wait()? {
                     // A concurrent `start` may have won the state lock; keep waiting for its daemon.
-                    let log = std::fs::read_to_string(state.join("daemon.log")).unwrap_or_default();
-                    if log
-                        .lines()
-                        .next_back()
-                        .is_some_and(|l| l.contains("another process owns this state directory"))
-                    {
+                    let log = std::fs::read(&log_path).unwrap_or_default();
+                    let since_spawn =
+                        String::from_utf8_lossy(&log[log.len().min(written_before as usize)..]);
+                    if since_spawn.contains("another process owns this state directory") {
                         continue;
                     }
                     anyhow::bail!(
@@ -229,11 +229,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Requests => json!({"action":"requests"}),
         Command::Inbox => json!({"action":"inbox"}),
         Command::Outbox => json!({"action":"outbox"}),
-        Command::Create {
-            service,
-            repository,
-        } => json!({"action":"create","service":service,"repository":repository}),
-        Command::Join { descriptor } => json!({"action":"join","descriptor":descriptor}),
+        Command::Create { repository } => json!({"action":"create","repository":repository}),
+        Command::Join { key } => json!({"action":"join","key":key}),
         Command::JoinStatus => json!({"action":"join-status"}),
         Command::Approve { member } => json!({"action":"approve","member":member}),
         Command::Reject { member } => json!({"action":"reject","member":member}),

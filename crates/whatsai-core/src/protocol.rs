@@ -49,11 +49,13 @@ pub struct Request {
     pub operation: Value,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// The join key: a team, its network secret, the founder, and where the founder's daemon can be reached.
 pub struct Invite {
     pub version: u32,
-    pub service: String,
     pub team: String,
     pub founder: String,
+    pub secret: String,
+    pub authority: Value,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Governance {
@@ -190,20 +192,15 @@ pub fn validate_remote(remote: &str) -> Result<()> {
     }
     Ok(())
 }
-pub fn validate_service(service: &str) -> Result<()> {
-    let u = url::Url::parse(service)?;
+/// A network secret is 32 random bytes; possession lets you ask to join, never more.
+pub fn validate_secret(secret: &str) -> Result<()> {
     ensure!(
-        u.username().is_empty()
-            && u.password().is_none()
-            && u.query().is_none()
-            && u.fragment().is_none(),
-        "invalid service URL"
-    );
-    ensure!(
-        u.scheme() == "https"
-            || (u.scheme() == "http"
-                && matches!(u.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))),
-        "service requires HTTPS (HTTP is allowed only on loopback)"
+        secret.len() == 64 && hex::decode(secret).is_ok(),
+        "invalid network secret"
     );
     Ok(())
+}
+pub fn secret_matches(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }

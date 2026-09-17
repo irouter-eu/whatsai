@@ -3,7 +3,7 @@ use whatsai_core::{crypto::Identity, protocol::*, transport};
 async fn roundtrip(relay: Option<&str>, forced: bool) -> anyhow::Result<String> {
     let a = transport::bind_mode(&Identity::generate("Alice"), relay, forced).await?;
     let b = transport::bind_mode(&Identity::generate("Bob"), relay, forced).await?;
-    if relay.is_some() {
+    if forced {
         b.online().await;
         a.online().await;
     }
@@ -30,7 +30,7 @@ async fn roundtrip(relay: Option<&str>, forced: bool) -> anyhow::Result<String> 
 }
 #[tokio::test]
 async fn direct_quic_roundtrip() {
-    assert_eq!(roundtrip(None, false).await.unwrap(), "direct");
+    assert_eq!(roundtrip(Some("off"), false).await.unwrap(), "direct");
 }
 #[tokio::test]
 async fn forced_self_hosted_relay_roundtrip() {
@@ -50,4 +50,53 @@ async fn forced_self_hosted_relay_roundtrip() {
     .unwrap();
     assert_eq!(path, "relay");
     relay.shutdown().await.unwrap();
+}
+
+#[test]
+fn relay_configuration_defaults_to_public_relays() {
+    use iroh::RelayMode;
+    assert!(matches!(
+        transport::relay_mode(None).unwrap(),
+        RelayMode::Default
+    ));
+    assert!(matches!(
+        transport::relay_mode(Some("default")).unwrap(),
+        RelayMode::Default
+    ));
+    assert!(matches!(
+        transport::relay_mode(Some(" off ")).unwrap(),
+        RelayMode::Disabled
+    ));
+    assert!(matches!(
+        transport::relay_mode(Some("https://relay.example.net")).unwrap(),
+        RelayMode::Custom(_)
+    ));
+    assert!(transport::relay_mode(Some("not a url")).is_err());
+}
+
+#[tokio::test]
+async fn a_remembered_port_is_reused_across_rebinds() {
+    let identity = Identity::generate("Stable");
+    let first = transport::bind_with(&identity, Some("off"), false, 0)
+        .await
+        .unwrap();
+    let port = transport::bound_port(&first).unwrap();
+    assert_ne!(port, 0);
+    first.close().await;
+    drop(first);
+    // The kernel releases the socket once the endpoint is dropped; a restarted daemon is a new process.
+    let mut second = None;
+    for _ in 0..50 {
+        match transport::bind_with(&identity, Some("off"), false, port).await {
+            Ok(endpoint) => {
+                second = Some(endpoint);
+                break;
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+        }
+    }
+    let second = second.expect("port released after the previous endpoint was dropped");
+    assert_eq!(transport::bound_port(&second), Some(port));
+    assert!(second.addr().ip_addrs().any(|a| a.port() == port));
+    second.close().await;
 }

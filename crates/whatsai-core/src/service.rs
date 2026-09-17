@@ -1,19 +1,10 @@
 use crate::{crypto::verify, governance::*, protocol::*, storage};
 use anyhow::{Context, Result, bail, ensure};
-use axum::{
-    Json, Router,
-    extract::{DefaultBodyLimit, State},
-    http::StatusCode,
-    routing::{get, post},
-};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{path::Path, sync::Mutex};
 const SCHEMA: &str = r#"
-CREATE TABLE teams(id TEXT PRIMARY KEY,founder TEXT NOT NULL,history TEXT NOT NULL);
+CREATE TABLE teams(id TEXT PRIMARY KEY,founder TEXT NOT NULL,secret TEXT NOT NULL,history TEXT NOT NULL);
 CREATE TABLE requests(team TEXT NOT NULL,member TEXT NOT NULL,body TEXT NOT NULL,state TEXT NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(team,member));
 CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,team TEXT NOT NULL,sender TEXT NOT NULL,envelope TEXT NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE recipients(event TEXT NOT NULL,member TEXT NOT NULL,acked INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(event,member));
@@ -32,16 +23,6 @@ impl Service {
             db: Mutex::new(storage::database(&dir.join("service.db"), SCHEMA)?),
             quota,
         })
-    }
-    pub fn router(self: Arc<Self>) -> Router {
-        Router::new()
-            .route(
-                "/health",
-                get(|| async { Json(json!({"version":VERSION})) }),
-            )
-            .route("/v1/rpc", post(rpc))
-            .layer(DefaultBodyLimit::max(MAX_FRAME))
-            .with_state(self)
     }
     pub fn handle(&self, request: Signed<Request>) -> Result<Value> {
         verify(&request)?;
@@ -74,6 +55,8 @@ impl Service {
         if method == "create" {
             let record: Signed<Governance> = serde_json::from_value(op["record"].clone())?;
             ensure!(record.signer == who, "creator mismatch");
+            let secret = field(op, "secret")?;
+            validate_secret(secret)?;
             let team = replay(std::slice::from_ref(&record), who)?;
             if let Ok(existing) = load_team(db, &team.id) {
                 ensure!(
@@ -83,8 +66,8 @@ impl Service {
                 return Ok(json!(existing));
             }
             db.execute(
-                "INSERT INTO teams VALUES(?,?,?)",
-                params![team.id, who, serde_json::to_string(&vec![record])?],
+                "INSERT INTO teams VALUES(?,?,?,?)",
+                params![team.id, who, secret, serde_json::to_string(&vec![record])?],
             )?;
             return Ok(json!(team));
         }
@@ -95,6 +78,14 @@ impl Service {
             let member: Member = serde_json::from_value(op["member"].clone())?;
             validate_member(&member)?;
             ensure!(member.id == who, "identity mismatch");
+            let stored: String =
+                db.query_row("SELECT secret FROM teams WHERE id=?", [team_id], |r| {
+                    r.get(0)
+                })?;
+            ensure!(
+                secret_matches(field(op, "secret").unwrap_or_default(), &stored),
+                "network secret rejected"
+            );
             if team.members.contains_key(who) {
                 return Ok(json!({"state":"admitted","team":team}));
             }
@@ -453,27 +444,4 @@ pub fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing {key}"))
-}
-async fn rpc(
-    State(service): State<Arc<Service>>,
-    Json(req): Json<Signed<Request>>,
-) -> (StatusCode, Json<Value>) {
-    let result = tokio::task::spawn_blocking(move || service.handle(req)).await;
-    match result {
-        Ok(Ok(v)) => (StatusCode::OK, Json(json!({"ok":true,"result":v}))),
-        Ok(Err(e)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"ok":false,"error":e.to_string()})),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok":false,"error":"service unavailable"})),
-        ),
-    }
-}
-pub async fn serve(listener: tokio::net::TcpListener, service: Arc<Service>) -> Result<()> {
-    axum::serve(listener, service.router())
-        .with_graceful_shutdown(crate::daemon::shutdown_signal())
-        .await?;
-    Ok(())
 }

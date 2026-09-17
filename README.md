@@ -1,6 +1,6 @@
 # WhatsAI
 
-Private teamwork for people using different coding agents. A local daemon provides a shared inbox, encrypted messages and files, explicit work status, and Git commit handoffs. Codex and Claude connect through the same local API.
+Private teamwork for people using different coding agents. A local daemon provides a shared inbox, encrypted messages and files, explicit work status, and Git commit handoffs. Codex and Claude connect through the same local API. Teams are their own networks: the founder's daemon is the team's authority, members reach each other over iroh QUIC directly or through a relay, and you join with a key. There is no server to host.
 
 This is an early implementation. Local acceptance tests and real-harness smoke tests exist; independent-network acceptance and macOS runtime validation are still required before this is a complete cross-network MVP. See [hosting and operations](docs/operations.md).
 
@@ -14,7 +14,7 @@ make test
 make smoke
 ```
 
-The executables are `target/debug/whatsai`, `whatsai-daemon`, and `whatsai-service`. Put all three in the same directory on your PATH. Build and install the Node adapter when using MCP:
+The executables are `target/debug/whatsai` and `whatsai-daemon`. Put both in the same directory on your PATH. Build and install the Node adapter when using MCP:
 
 ```sh
 npm --prefix adapters run build
@@ -23,29 +23,25 @@ npm install -g ./adapters
 
 The repository does not install background services or alter harness configuration automatically.
 
-## Create and join a team — no website
+## Create and join a team — no server
 
-For a local demo, run the authority in its own terminal:
-
-```sh
-whatsai-service --state /tmp/whatsai-service --listen 127.0.0.1:8787
-```
-
-Alice creates the team:
+Alice starts her daemon and creates the team. Her daemon becomes the network's authority and prints the join key:
 
 ```sh
 export WHATSAI_STATE="$PWD/.whatsai/alice"
 whatsai start --name Alice
-whatsai create --service http://127.0.0.1:8787 --repository https://example.com/team/repo.git
+whatsai create --repository https://example.com/team/repo.git
 whatsai invite
 ```
 
-Bob starts a daemon with a different state directory (or on another machine) and submits the printed join descriptor:
+The key is one `whatsai1.` string carrying the team ID, the network secret, Alice's fingerprint, and the address of her daemon. `invite` reports `relay: true` once the daemon has a relay connection; before that the key only reaches Alice on the local network, so wait for it before sending the key to someone elsewhere. Hand the key only to people you want on the team.
+
+Bob starts a daemon with a different state directory, or on another machine, and joins with the key:
 
 ```sh
 export WHATSAI_STATE="$PWD/.whatsai/bob"
 whatsai start --name Bob
-whatsai join 'whatsai1.DESCRIPTOR_FROM_ALICE'
+whatsai join 'whatsai1.KEY_FROM_ALICE'
 whatsai register
 ```
 
@@ -57,9 +53,9 @@ whatsai approve BOB_FINGERPRINT
 whatsai promote BOB_FINGERPRINT
 ```
 
-Bob can now approve others even while Alice is offline. Requests expire after 24 hours. The descriptor contains team/service/founder information; possession is not membership. Admins can `reject`, `demote`, and `revoke`; the last admin cannot leave remaining members without an administrator. Members can `leave`. No election/voting machinery is included.
+Holding the key is not membership. Requests expire after 24 hours. Admins can `reject`, `demote`, and `revoke`; the last admin cannot leave remaining members without an administrator. Members can `leave`. No election or voting machinery is included.
 
-The loopback service URL above works on one machine only. Different machines require a shared HTTPS authority URL and a configured relay; see [hosting and installation](docs/operations.md).
+The founder's daemon is the team's authority in this first implementation: it approves admissions, records membership changes, and holds the encrypted mailbox for members who are offline. While it is offline, new admissions and mailbox delivery wait, and members who are online keep talking to each other directly. Mirroring the authority to every admin's daemon is the next step. Daemons use iroh's public relays by default so teams work across NATs with nothing to host; see [hosting and operations](docs/operations.md) for self-hosted relays and LAN-only setups.
 
 ## Chat, files, and code handoffs
 
@@ -148,6 +144,6 @@ make worker-smoke
 
 ## Trust and limits
 
-Content is encrypted on clients before mailbox storage, using per-recipient HPKE key wrapping and authenticated payload encryption. Administrators sign membership/role changes in a chain rooted in the founder fingerprint. The service sees routing metadata, member identities, sizes and timing, and remains trusted for freshness/availability. This is not an independently audited cryptographic product and does not claim forward secrecy or compromised-device recovery.
+Content is encrypted on clients before mailbox storage, using per-recipient HPKE key wrapping and authenticated payload encryption. Administrators sign membership/role changes in a chain rooted in the founder fingerprint. The founder's daemon, as the authority, sees routing metadata, member identities, sizes and timing, and remains trusted for freshness/availability; relays see only encrypted QUIC. This is not an independently audited cryptographic product and does not claim forward secrecy or compromised-device recovery.
 
-The authority must be reachable for new authorization, even on direct peer transfers. During outages, local reading and queueing work; delivery waits. Revocation prevents new authorization, not access to bytes a member already downloaded. Stored messages/files have a seven-day retention window; capacity errors are explicit. The first implementation supports one team and one device identity per state directory. Keep private state backups: identity recovery and multi-device sync are not implemented.
+The founder's daemon must be reachable for new authorization, even on direct peer transfers. While it is offline, local reading and queueing work; admissions and delivery wait. Revocation prevents new authorization, not access to bytes a member already downloaded. Stored messages/files have a seven-day retention window; capacity errors are explicit. The first implementation supports one team and one device identity per state directory. Keep private state backups: identity recovery and multi-device sync are not implemented.

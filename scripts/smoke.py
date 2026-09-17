@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Local process-level acceptance: isolated authority and three real daemons."""
-import json, os, pathlib, subprocess, tempfile, time, hashlib, socket, sqlite3
+"""Local process-level acceptance: three real daemons; the founder hosts the network authority.
+
+Runs with WHATSAI_RELAY=off so it is hermetic; relay traversal is covered by the Rust transport tests."""
+import json, os, pathlib, subprocess, tempfile, time, hashlib, sqlite3
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 BIN=ROOT/'target/debug'
 
 def main():
  with tempfile.TemporaryDirectory(prefix='whatsai-smoke-') as tmp:
   base=pathlib.Path(tmp); processes=[]
-  sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
+  env={**os.environ,'WHATSAI_RELAY':'off'}
   def start(name,args):
-   log=open(base/(name+'.log'),'w');p=subprocess.Popen(args,stdout=log,stderr=log);processes.append((p,log));return p
+   log=open(base/(name+'.log'),'w');p=subprocess.Popen(args,stdout=log,stderr=log,env=env);processes.append((p,log));return p
   def cli(who,*args,check=True):
    r=subprocess.run([str(BIN/'whatsai'),'--state',str(base/who),*args],capture_output=True,text=True,timeout=60)
    if check and r.returncode:raise AssertionError(r.stderr)
@@ -25,20 +27,24 @@ def main():
     time.sleep(.1)
    raise AssertionError('daemon did not start')
   try:
-   service=start('service',[str(BIN/'whatsai-service'),'--state',str(base/'service'),'--listen',f'127.0.0.1:{port}'])
-   time.sleep(.3)
    nodes={}
    for who in ['alice','bob','charlie']:
     nodes[who]=start(who,[str(BIN/'whatsai-daemon'),'--state',str(base/who),'--name',who]);await_ready(who)
-   invitation=cli('alice','create','--service',f'http://127.0.0.1:{port}','--repository','https://example.com/team/repo.git')
+   invitation=cli('alice','create','--repository','https://example.com/team/repo.git')
+   assert invitation['join'].startswith('whatsai1.') and cli('alice','health')['authority']['id']==cli('alice','health')['endpoint']['id']
+   tampered=invitation['join'][:-6]+'AAAAAA'
+   assert cli('bob','join',tampered,check=False).returncode!=0
    assert cli('bob','join',invitation['join'])['state']=='pending'
    bob=cli('bob','register')['id'];alice=cli('alice','register')['id']
    assert cli('bob','list',check=False).returncode!=0
    cli('alice','approve',bob);cli('bob','join-status');cli('alice','promote',bob)
+   print('PASS founder-hosted authority: key admits only with approval; tampered keys are refused',flush=True)
    cli('alice','stop');nodes['alice'].wait(timeout=5)
+   assert cli('charlie','join',invitation['join'],check=False).returncode!=0
+   nodes['alice']=start('alice-restart',[str(BIN/'whatsai-daemon'),'--state',str(base/'alice'),'--name','alice']);await_ready('alice')
    assert cli('charlie','join',invitation['join'])['state']=='pending'
    charlie=cli('charlie','register')['id'];cli('bob','approve',charlie);cli('charlie','join-status')
-   print('PASS promoted admin admits while creator is offline',flush=True)
+   print('PASS admissions wait while the founder is offline; a promoted admin admits once it is back',flush=True)
    eid=cli('bob','send','synthetic durable message')['id'];cli('bob','sync')
    cli('bob','stop');nodes['bob'].wait(timeout=5)
    cli('charlie','sync');assert any(x['id']==eid for x in cli('charlie','inbox'))
@@ -71,13 +77,14 @@ def main():
    assert cli('bob','demote',bob)['admins']==[alice]
    assert cli('bob','promote',bob,check=False).returncode!=0
    print('PASS ordinary member cannot promote itself',flush=True)
-   service.terminate();service.wait(timeout=10)
-   offline=cli('bob','send','queued during authority outage')['id']
+   cli('alice','stop');nodes['alice'].wait(timeout=5)
+   offline=cli('bob','send','queued during founder outage')['id']
    assert any(x['id']==offline and x['state']=='queued' for x in cli('bob','outbox'))
-   service=start('service-restart',[str(BIN/'whatsai-service'),'--state',str(base/'service'),'--listen',f'127.0.0.1:{port}']);time.sleep(.5)
+   assert cli('bob','sync',check=False).returncode!=0
+   nodes['alice']=start('alice-restart-2',[str(BIN/'whatsai-daemon'),'--state',str(base/'alice'),'--name','alice']);await_ready('alice')
    cli('bob','sync')
    assert any(x['id']==offline and x['state']=='service-stored' for x in cli('bob','outbox'))
-   print('PASS authority-outage queueing and recovery',flush=True)
+   print('PASS founder-outage queueing and recovery on the remembered port',flush=True)
   finally:
    for p,log in processes:
     if p.poll() is None:p.terminate()
