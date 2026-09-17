@@ -113,7 +113,9 @@ claude --plugin-dir ./plugins/whatsai
 
 The plugin supplies skills such as `/whatsai:create`, `/whatsai:join`, `/whatsai:requests`, `/whatsai:approve`, `/whatsai:send`, and `/whatsai:inbox`. Plugin loading depends on the installed harness's plugin support; the CLI is the stable fallback.
 
-You do not need to start the daemon by hand for a harness session. The Claude plugin runs `whatsai start` from a `SessionStart` hook, and the `whatsai-mcp` adapter starts the daemon on demand when a tool call finds it unavailable, so the first MCP call from any harness also works. Both paths are idempotent and never block the session when the executables are missing; the hook then reports that instead. A first launch names the new identity from `WHATSAI_NAME`, else your account name; the name cannot be changed later, so set `WHATSAI_NAME` before the first start if you want something else. Set `WHATSAI_STATE` in the environment that launches your harness so the hook, the MCP process, and your shell all use the same daemon.
+Each coding agent gets its own identity: the Claude plugin uses `~/.local/share/whatsai/claude`, the Codex plugin `~/.local/share/whatsai/codex`, and the plain CLI `~/.local/share/whatsai/cli`, selected by `WHATSAI_HARNESS` or `whatsai --harness claude`. `WHATSAI_STATE` overrides all of them. One state directory is one member, so Claude and Codex on the same machine join a team as two members and can message each other.
+
+You do not need to start the daemon by hand for a harness session. The Claude plugin runs `whatsai start` from a `SessionStart` hook, and the `whatsai-mcp` adapter starts the daemon on demand when a tool call finds it unavailable, so the first MCP call from any harness also works. Both paths are idempotent and never block the session when the executables are missing; the hook then reports that instead. A first launch names the new identity from `WHATSAI_NAME`, else your account name; the name cannot be changed later, so set `WHATSAI_NAME` before the first start if you want something else. To operate a harness's daemon from your shell, pass `--harness claude` or `--harness codex`.
 
 ### ChatGPT
 

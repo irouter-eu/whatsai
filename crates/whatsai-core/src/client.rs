@@ -744,7 +744,7 @@ impl Client {
                     .collect::<Vec<_>>()
             )),
             "health" => Ok(
-                json!({"version":VERSION,"member":self.identity.member()?,"team":self.config("team")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"authority":self.config("authority")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"endpoint":self.config("endpoint")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"last_sync_error":self.config("last_sync_error")?,"last_peer_path":self.config("last_peer_path")?,"last_file_path":self.config("last_file_path")?}),
+                json!({"version":VERSION,"state":self.dir,"member":self.identity.member()?,"team":self.config("team")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"authority":self.config("authority")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"endpoint":self.config("endpoint")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"last_sync_error":self.config("last_sync_error")?,"last_peer_path":self.config("last_peer_path")?,"last_file_path":self.config("last_file_path")?}),
             ),
             "register" => Ok(json!(self.identity.member()?)),
             "create" => self.create(field(&cmd, "repository")?).await,

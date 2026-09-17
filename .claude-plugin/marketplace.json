@@ -13,9 +13,16 @@
       "name": "whatsai",
       "source": "whatsai",
       "description": "Team messaging, file sharing, work status and Git handoffs through the local WhatsAI daemon.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "productivity",
-      "keywords": ["team", "messaging", "codex", "claude", "handoff", "mcp"]
+      "keywords": [
+        "team",
+        "messaging",
+        "codex",
+        "claude",
+        "handoff",
+        "mcp"
+      ]
     }
   ]
 }

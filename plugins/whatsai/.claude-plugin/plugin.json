@@ -1,6 +1,6 @@
 {
   "name": "whatsai",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Private teamwork for people and coding agents",
   "author": {
     "name": "WhatsAI maintainers",
@@ -16,5 +16,6 @@
     "handoff",
     "mcp"
   ],
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
 }

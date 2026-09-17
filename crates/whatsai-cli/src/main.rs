@@ -4,8 +4,12 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(version, about = "Private teamwork for people and their coding agents")]
 struct Args {
+    /// State directory; defaults to ~/.local/share/whatsai/<harness>.
     #[arg(long, env = "WHATSAI_STATE", global = true)]
     state: Option<PathBuf>,
+    /// Which coding agent this command acts for (claude, codex, ...); picks the default state directory.
+    #[arg(long, env = "WHATSAI_HARNESS", global = true)]
+    harness: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -134,9 +138,10 @@ fn default_name() -> String {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let state = args
-        .state
-        .unwrap_or_else(whatsai_core::storage::default_state);
+    let state = match args.state {
+        Some(state) => state,
+        None => whatsai_core::storage::default_state_for(args.harness.as_deref())?,
+    };
     let command = match args.command {
         Command::Start { name } => {
             if let Ok(result) =

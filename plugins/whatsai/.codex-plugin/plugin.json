@@ -1,6 +1,6 @@
 {
   "name": "whatsai",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Private team messaging, file sharing, and repository handoffs for coding agents.",
   "author": {
     "name": "WhatsAI maintainers",
@@ -17,7 +17,7 @@
     "defaultPrompt": "Show my WhatsAI team and pending messages.",
     "websiteURL": "https://github.com/irouter-eu/whatsai"
   },
-  "mcpServers": "./.mcp.json",
+  "mcpServers": "./.mcp.codex.json",
   "homepage": "https://github.com/irouter-eu/whatsai",
   "keywords": [
     "team",

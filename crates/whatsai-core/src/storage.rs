@@ -86,13 +86,33 @@ pub fn database(path: &Path, ddl: &str) -> Result<Connection> {
     }
     Ok(c)
 }
-pub fn default_state() -> PathBuf {
-    std::env::var_os("WHATSAI_STATE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()))
-                .join(".local/share/whatsai")
-        })
+/// The state directory for a harness: `WHATSAI_STATE` wins; otherwise each harness (and the
+/// plain CLI) gets its own directory under the base, so one machine can hold one identity per
+/// coding agent and they join a team as distinct members.
+pub fn default_state_for(harness: Option<&str>) -> Result<PathBuf> {
+    if let Some(explicit) = std::env::var_os("WHATSAI_STATE") {
+        return Ok(PathBuf::from(explicit));
+    }
+    let harness = harness
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or("cli");
+    ensure!(
+        harness.len() <= 32
+            && harness
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "invalid harness name {harness:?}: use letters, digits, '-' or '_'"
+    );
+    Ok(base_state().join(harness))
+}
+pub fn base_state() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()))
+        .join(".local/share/whatsai")
+}
+pub fn default_state() -> Result<PathBuf> {
+    let harness = std::env::var("WHATSAI_HARNESS").ok();
+    default_state_for(harness.as_deref())
 }
 pub const CLIENT_SCHEMA: &str = r#"
 CREATE TABLE config(key TEXT PRIMARY KEY,value TEXT NOT NULL);
