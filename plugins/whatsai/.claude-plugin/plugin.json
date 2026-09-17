@@ -15,5 +15,6 @@
     "claude",
     "handoff",
     "mcp"
-  ]
+  ],
+  "hooks": "./hooks/hooks.json"
 }

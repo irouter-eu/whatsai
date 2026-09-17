@@ -12,7 +12,8 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     Start {
-        #[arg(long, default_value = "Member")]
+        /// Display name for a new identity; ignored once an identity exists.
+        #[arg(long, env = "WHATSAI_NAME", default_value_t = default_name())]
         name: String,
     },
     Register,
@@ -121,6 +122,15 @@ enum WorkerCommand {
         root: String,
     },
 }
+/// New identities default to the local account name so automatic starts never create a "Member".
+fn default_name() -> String {
+    ["WHATSAI_NAME", "USER", "LOGNAME"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|v| v.trim().to_string())
+        .find(|v| !v.is_empty() && v.len() <= 80 && !v.chars().any(char::is_control))
+        .unwrap_or_else(|| "Member".into())
+}
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -135,6 +145,8 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&result)?);
                 return Ok(());
             }
+            // Fail before spawning when the socket path can never bind, with the same message the daemon gives.
+            whatsai_core::daemon::socket_path(&state)?;
             whatsai_core::storage::private_dir(&state)?;
             use std::os::unix::fs::OpenOptionsExt;
             let log = std::fs::OpenOptions::new()
@@ -164,6 +176,15 @@ async fn main() -> anyhow::Result<()> {
                     return Ok(());
                 }
                 if let Some(status) = child.try_wait()? {
+                    // A concurrent `start` may have won the state lock; keep waiting for its daemon.
+                    let log = std::fs::read_to_string(state.join("daemon.log")).unwrap_or_default();
+                    if log
+                        .lines()
+                        .next_back()
+                        .is_some_and(|l| l.contains("another process owns this state directory"))
+                    {
+                        continue;
+                    }
                     anyhow::bail!(
                         "daemon exited {status}; inspect {}",
                         state.join("daemon.log").display()
