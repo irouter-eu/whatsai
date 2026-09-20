@@ -1,6 +1,6 @@
 {
   "name": "whatsai",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Private team messaging, file sharing, and repository handoffs for coding agents.",
   "author": {
     "name": "WhatsAI maintainers",

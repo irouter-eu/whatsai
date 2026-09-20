@@ -1,3 +1,5 @@
+mod ui;
+mod view;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -14,6 +16,9 @@ struct Args {
     /// current directory is bound to, or the only team you have.
     #[arg(long, global = true)]
     team: Option<String>,
+    /// Print a fixed table instead of JSON, for commands that have one.
+    #[arg(long, global = true)]
+    table: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -30,6 +35,8 @@ enum Command {
     Version,
     /// Teams you belong to, are joining, or are still creating.
     Teams,
+    /// The terminal client: teams, members, inbox, requests and agents, live, with fixed keys.
+    Ui,
     /// Profiles with an identity on this machine (people sharing this OS account).
     Profiles,
     Stop,
@@ -40,10 +47,13 @@ enum Command {
     /// Read the inbox, optionally as one agent sees it.
     Inbox {
         /// Only messages addressed to this agent or shared with everyone.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "harness")]
         agent: Option<String>,
+        /// The agent for this harness in the current directory, without knowing its label.
+        #[arg(long)]
+        harness: Option<String>,
         /// Only what that agent has not marked read.
-        #[arg(long, requires = "agent")]
+        #[arg(long)]
         unread: bool,
     },
     Outbox,
@@ -426,6 +436,10 @@ async fn main() -> anyhow::Result<()> {
                 json!({"action":"worker","operation":"reset","agent":agent,"root":root})
             }
         },
+        Command::Ui => {
+            let state_for_ui = state.clone();
+            return tokio::task::spawn_blocking(move || ui::main(state_for_ui)).await?;
+        }
         Command::Version => {
             let mut report = json!({"cli":env!("CARGO_PKG_VERSION")});
             match whatsai_core::daemon::request(&state, json!({"action":"version"})).await {
@@ -439,7 +453,11 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(e) => report["daemon"] = json!({"error":e.to_string()}),
             }
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            if args.table {
+                println!("{}", view::version(&report).join("\n"));
+            } else {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
             return Ok(());
         }
         Command::Profiles => {
@@ -457,7 +475,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Invite => json!({"action":"invite"}),
         Command::List => json!({"action":"list"}),
         Command::Requests => json!({"action":"requests"}),
-        Command::Inbox { agent, unread } => json!({"action":"inbox","agent":agent,"unread":unread}),
+        Command::Inbox {
+            agent,
+            harness,
+            unread,
+        } => json!({"action":"inbox","agent":agent,"harness":harness,"unread":unread}),
         Command::Outbox => json!({"action":"outbox"}),
         Command::Create {
             repository,
@@ -536,9 +558,30 @@ async fn main() -> anyhow::Result<()> {
     if let Ok(cwd) = std::env::current_dir() {
         command["cwd"] = json!(cwd);
     }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&whatsai_core::daemon::request(&state, command).await?)?
-    );
+    let action = command["action"].as_str().unwrap_or("").to_owned();
+    let result = whatsai_core::daemon::request(&state, command.clone()).await?;
+    if args.table {
+        // Inbox rows name senders when the team roster is at hand.
+        let names = if matches!(action.as_str(), "inbox" | "files") {
+            let mut list = json!({"action":"list"});
+            for key in ["team", "cwd"] {
+                if !command[key].is_null() {
+                    list[key] = command[key].clone();
+                }
+            }
+            whatsai_core::daemon::request(&state, list)
+                .await
+                .map(|t| t["members"].clone())
+                .unwrap_or(json!({}))
+        } else {
+            json!({})
+        };
+        match view::render(&action, &result, &names) {
+            Some(lines) => println!("{}", lines.join("\n")),
+            None => println!("{}", serde_json::to_string_pretty(&result)?),
+        }
+    } else {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    }
     Ok(())
 }

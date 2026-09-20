@@ -5,7 +5,7 @@ import {z} from 'zod';
 import {local} from './local.js';
 import {attachAgent,stamp} from './agent.js';
 
-const ADAPTER_VERSION='0.7.1';
+const ADAPTER_VERSION='0.8.0';
 const actions=['version','register','health','teams','create','invite','join','join-status','list','requests','approve','reject','promote','demote','revoke','leave','inbox','unread','mark-read','publish','unpublish','enroll','unenroll','outbox','sync','agent-send','files','share','download','status','handoff','agents'] as const;
 // Actions where the calling session's agent label is the sender or the subject.
 const asAgent=new Set(['agent-send','status','share','handoff','inbox','unread','mark-read','publish','unpublish','enroll','unenroll']);

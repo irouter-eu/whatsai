@@ -1293,9 +1293,21 @@ impl Client {
                     .as_str()
                     .map(|s| self.find_team(s))
                     .transpose()?;
+                let resolved = match (
+                    cmd["agent"].as_str(),
+                    cmd["harness"].as_str(),
+                    cmd["cwd"].as_str(),
+                ) {
+                    (Some(label), _, _) => Some(label.to_owned()),
+                    (None, Some(harness), Some(cwd)) => Some(
+                        self.resolve_agent(harness, Path::new(cwd))?
+                            .context("no agent for this harness in this directory yet")?,
+                    ),
+                    _ => None,
+                };
                 self.inbox_for(
                     scope.as_deref(),
-                    cmd["agent"].as_str(),
+                    resolved.as_deref(),
                     cmd["unread"].as_bool().unwrap_or(false),
                 )
             }
