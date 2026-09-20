@@ -26,6 +26,8 @@ enum Command {
     },
     Register,
     Health,
+    /// Versions of this CLI, the running daemon, and its database schema.
+    Version,
     /// Teams you belong to, are joining, or are still creating.
     Teams,
     /// Profiles with an identity on this machine (people sharing this OS account).
@@ -424,6 +426,22 @@ async fn main() -> anyhow::Result<()> {
                 json!({"action":"worker","operation":"reset","agent":agent,"root":root})
             }
         },
+        Command::Version => {
+            let mut report = json!({"cli":env!("CARGO_PKG_VERSION")});
+            match whatsai_core::daemon::request(&state, json!({"action":"version"})).await {
+                Ok(daemon) => {
+                    report["daemon"] = daemon;
+                    if report["daemon"]["daemon"] != env!("CARGO_PKG_VERSION") {
+                        report["notice"] = json!(
+                            "the running daemon is a different release; run `whatsai stop` then `whatsai start` after installing"
+                        );
+                    }
+                }
+                Err(e) => report["daemon"] = json!({"error":e.to_string()}),
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
         Command::Profiles => {
             println!(
                 "{}",

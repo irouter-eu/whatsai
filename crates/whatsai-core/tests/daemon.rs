@@ -30,3 +30,21 @@ async fn request_refuses_an_overlong_state_path_before_connecting() {
         .to_string();
     assert!(error.contains("too long for a Unix socket"), "{error}");
 }
+
+#[tokio::test]
+async fn version_reports_the_release_and_schema() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut c = whatsai_core::client::Client::open(tmp.path(), "V").unwrap();
+    let v = c
+        .command(serde_json::json!({"action":"version"}))
+        .await
+        .unwrap();
+    assert_eq!(v["daemon"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(v["protocol"], whatsai_core::protocol::VERSION);
+    assert!(v["database"].as_i64().unwrap() >= 5);
+    let health = c
+        .command(serde_json::json!({"action":"health"}))
+        .await
+        .unwrap();
+    assert_eq!(health["release"], env!("CARGO_PKG_VERSION"));
+}

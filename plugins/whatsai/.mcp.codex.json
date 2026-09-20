@@ -3,7 +3,8 @@
     "whatsai": {
       "command": "whatsai-mcp",
       "env": {
-        "WHATSAI_HARNESS": "codex"
+        "WHATSAI_HARNESS": "codex",
+        "WHATSAI_PLUGIN_VERSION": "0.7.1"
       }
     }
   }

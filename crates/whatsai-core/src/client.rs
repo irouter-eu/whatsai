@@ -1204,8 +1204,14 @@ impl Client {
                         .collect::<Vec<_>>()
                 ))
             }
+            "version" => Ok(json!({
+                "daemon":env!("CARGO_PKG_VERSION"),
+                "protocol":VERSION,
+                "state":self.dir,
+                "database":self.db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0))?,
+            })),
             "health" => Ok(
-                json!({"version":VERSION,"state":self.dir,"member":self.identity.member()?,"teams":self.teams()?,"agents":self.agents()?.as_array().map(|a|a.len()).unwrap_or(0),"endpoint":self.config("endpoint")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"last_sync_error":self.config("last_sync_error")?,"last_peer_path":self.config("last_peer_path")?,"last_file_path":self.config("last_file_path")?}),
+                json!({"version":VERSION,"release":env!("CARGO_PKG_VERSION"),"state":self.dir,"member":self.identity.member()?,"teams":self.teams()?,"agents":self.agents()?.as_array().map(|a|a.len()).unwrap_or(0),"endpoint":self.config("endpoint")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"last_sync_error":self.config("last_sync_error")?,"last_peer_path":self.config("last_peer_path")?,"last_file_path":self.config("last_file_path")?}),
             ),
             "register" => Ok(json!(self.identity.member()?)),
             "create" => {

@@ -14,7 +14,7 @@ test('MCP reaches the real daemon and cannot override its declared action', {ski
  try {
   await new Promise<void>((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('Daemon startup timeout')),10_000);daemon.stderr.on('data',b=>{if(String(b).includes('daemon ready')){clearTimeout(timeout);resolve();}});daemon.on('error',reject);});
   const env=Object.fromEntries(Object.entries(process.env).filter((x):x is [string,string]=>typeof x[1]==='string'));
-  await client.connect(new StdioClientTransport({command:process.execPath,args:[resolve('dist/mcp.js')],env:{...env,WHATSAI_BIN:binary,WHATSAI_STATE:dir,WHATSAI_HARNESS:'testharness'}}));
+  await client.connect(new StdioClientTransport({command:process.execPath,args:[resolve('dist/mcp.js')],env:{...env,WHATSAI_BIN:binary,WHATSAI_STATE:dir,WHATSAI_HARNESS:'testharness',WHATSAI_PLUGIN_VERSION:'test-plugin'}}));
   const tools=await client.listTools();const tool=tools.tools.find(t=>t.name==='whatsai');assert.ok(tool);
   assert.match(tool.description??'',/agent testharness@\S+: NOT enrolled in any team.*private/,'the tool announces the agent, that it is not enrolled, and that it is private');
   const refused=await client.callTool({name:'whatsai',arguments:{action:'list'}});
@@ -28,6 +28,9 @@ test('MCP reaches the real daemon and cannot override its declared action', {ski
   const published=await client.callTool({name:'whatsai',arguments:{action:'publish'}});
   assert.ok(published.isError,'publishing needs a team to enroll into');
   assert.match((published.content as any[])[0].text,/not a member of a team yet|say which team/);
+  const version=await client.callTool({name:'whatsai',arguments:{action:'version'}});
+  const v=JSON.parse((version.content as any[])[0].text);
+  assert.equal(v.adapter,'0.7.1');assert.equal(v.plugin,'test-plugin');assert.match(v.daemon,/^\d+\.\d+\.\d+$/);assert.equal(typeof v.database,'number');assert.equal(v.mismatch,v.daemon!=='0.7.1');
   const teams=await client.callTool({name:'whatsai',arguments:{action:'teams'}});
   assert.deepEqual(JSON.parse((teams.content as any[])[0].text),[],'no teams yet');
   const unread=await client.callTool({name:'whatsai',arguments:{action:'unread'}});

@@ -5,13 +5,14 @@ import {z} from 'zod';
 import {local} from './local.js';
 import {attachAgent,stamp} from './agent.js';
 
-const actions=['register','health','teams','create','invite','join','join-status','list','requests','approve','reject','promote','demote','revoke','leave','inbox','unread','mark-read','publish','unpublish','enroll','unenroll','outbox','sync','agent-send','files','share','download','status','handoff','agents'] as const;
+const ADAPTER_VERSION='0.7.1';
+const actions=['version','register','health','teams','create','invite','join','join-status','list','requests','approve','reject','promote','demote','revoke','leave','inbox','unread','mark-read','publish','unpublish','enroll','unenroll','outbox','sync','agent-send','files','share','download','status','handoff','agents'] as const;
 // Actions where the calling session's agent label is the sender or the subject.
 const asAgent=new Set(['agent-send','status','share','handoff','inbox','unread','mark-read','publish','unpublish','enroll','unenroll']);
 const agentOps=new Set(['unread','mark-read','publish','unpublish','enroll','unenroll']);
 
 let session=await attachAgent();
-const server=new McpServer({name:'whatsai',version:'0.7.0'});
+const server=new McpServer({name:'whatsai',version:ADAPTER_VERSION});
 const identity=session.label
  ?`This session is the agent ${session.label}: ${session.enrolled?`enrolled in the team "${session.team}"`:'NOT enrolled in any team, so team actions are refused until the user creates or joins a team for this workspace, or enrolls it (action enroll)'}; ${session.published?'published, teammates can see and address it':'private, the team cannot see it until the user asks to publish it'}. Teams are bound to a workspace: a Git remote when there is one, otherwise the directory itself. Address teammates by name, by a published agent label such as codex@repo, or NAME/LABEL.`
  :'This session could not attach as an agent; team actions are refused until the daemon accepts an attach.';
@@ -26,7 +27,13 @@ server.tool('whatsai',`Operate the local WhatsAI team daemon. ${identity} Remote
   if(asAgent.has(action) && session.label && command.agent===undefined)command.agent=session.label;
   if(agentOps.has(action)){command.action='agent';command.operation=action;}
   else command.action=action;
-  const result=await local(command);return {content:[{type:'text',text:JSON.stringify(result)}]};
+  const result=await local(command);
+  if(action==='version'){
+   const daemon=result as Record<string,unknown>;
+   const out={adapter:ADAPTER_VERSION,plugin:process.env.WHATSAI_PLUGIN_VERSION??'unknown',...daemon,agent:session.label??null,mismatch:daemon.daemon!==ADAPTER_VERSION};
+   return {content:[{type:'text',text:JSON.stringify(out)}]};
+  }
+  return {content:[{type:'text',text:JSON.stringify(result)}]};
  }catch(e){return {isError:true,content:[{type:'text',text:e instanceof Error?e.message:String(e)}]};}
 });
 await server.connect(new StdioServerTransport());
