@@ -37,7 +37,7 @@ async function codex(work:Work,timeout:number):Promise<Reply>{
   }
  });
  try{
-  await call('initialize',{clientInfo:{name:'whatsai',title:'WhatsAI',version:'0.6.1'}});send({method:'initialized',params:{}});
+  await call('initialize',{clientInfo:{name:'whatsai',title:'WhatsAI',version:'0.6.2'}});send({method:'initialized',params:{}});
   const params={cwd:work.cwd,approvalPolicy:'never',sandbox:'read-only',developerInstructions:instruction};
   const result=work.session?await call('thread/resume',{...params,threadId:work.session}):await call('thread/start',params);
   threadId=result.thread.id;

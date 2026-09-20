@@ -138,7 +138,8 @@ def main():
    rpc('bob',{'action':'agent','operation':'attach','harness':'claude','workspace':str(other)})
    own=cli('bob','join',key2['join'],'--workspace',str(other))
    assert own['state']=='enrolled' and own['agents']==['claude@bob-other'],own
-   assert rpc('bob',{'action':'agent','operation':'show','agent':'claude@bob-other'})['team_name']=='bob-notes'
+   shown=rpc('bob',{'action':'agent','operation':'show','agent':'claude@bob-other'});assert shown['team_name']=='bob-notes' and shown['published'],shown
+   cli('bob','sync');cli('charlie','sync');assert any(a['label']=='claude@bob-other' for a in cli('charlie','--team','bob-notes','list')['agents'][bob]),'a deliberate join is visible to teammates'
    print('PASS a second, path-bound team without Git: directory-scoped enrolment, --team selection, messages stay put',flush=True)
   finally:
    for p,log in processes:

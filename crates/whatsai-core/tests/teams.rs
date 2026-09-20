@@ -106,6 +106,10 @@ async fn teams_bind_to_a_directory_or_a_repository_and_git_is_optional() {
         (a["enrolled"].as_bool(), a["team"].as_str()),
         (Some(true), Some(notes_id))
     );
+    assert_eq!(
+        a["published"], false,
+        "a silent attach stays private even in a matching directory"
+    );
     assert_eq!(a["team_name"], "notes");
     let b = c.attach("claude", &repo, None, None, None).unwrap()["agent"].clone();
     assert_eq!(b["team"].as_str(), Some(app_id));
@@ -263,6 +267,18 @@ async fn joining_with_a_key_you_already_hold_enrolls_that_workspace() {
         (Some(true), Some("copyk8"))
     );
     assert_eq!(
+        after["published"], true,
+        "a deliberate join makes the joiner visible"
+    );
+    let visible = c.agent_presence(key["team"].as_str().unwrap()).unwrap();
+    assert!(
+        visible
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["label"] == session["label"])
+    );
+    assert_eq!(
         c.teams().unwrap().as_array().unwrap().len(),
         1,
         "no second membership was created"
@@ -273,4 +289,23 @@ async fn joining_with_a_key_you_already_hold_enrolls_that_workspace() {
             .is_ok(),
         "the session can now act in the team"
     );
+}
+
+#[tokio::test]
+async fn the_founding_session_is_visible_in_its_team() {
+    let tmp = TempDir::new().unwrap();
+    let mut c = founder(&tmp);
+    let copyk8 = tmp.path().join("copyk8");
+    std::fs::create_dir(&copyk8).unwrap();
+    let codex = c.attach("codex", &copyk8, None, None, None).unwrap()["agent"].clone();
+    let key = c
+        .command(json!({"action":"create","workspace":copyk8,"via":codex["label"]}))
+        .await
+        .unwrap();
+    assert_eq!(key["agents"], json!([codex["label"]]));
+    let team = key["team"].as_str().unwrap();
+    let visible = c.agent_presence(team).unwrap();
+    assert_eq!(visible.as_array().unwrap().len(), 1);
+    assert_eq!(visible[0]["label"], codex["label"]);
+    assert_eq!(visible[0]["workspace"], "copyk8");
 }

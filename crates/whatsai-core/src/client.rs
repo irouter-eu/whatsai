@@ -393,7 +393,11 @@ impl Client {
         self.install_team(&t, &address, &secret, Some(&path))?;
         self.db
             .execute("DELETE FROM creating WHERE id=?", [&t.id])?;
-        self.invite(&t.id)
+        // Founding a team from a directory is intent enough: its agents take part and are visible.
+        let published = self.publish_path(&t.id, &path)?;
+        let mut key = self.invite(&t.id)?;
+        key["agents"] = json!(published);
+        Ok(key)
     }
     /// The join key. Founders embed their live address so the key improves once a relay is known.
     pub fn invite(&self, team: &str) -> Result<Value> {
@@ -452,13 +456,13 @@ impl Client {
         // The same identity holding the key, from another checkout: that is an enrolment of this
         // workspace into a team it already belongs to, not an admission.
         if let Ok(m) = self.membership(&card.team) {
-            let enrolled = self.enroll_path(&m.id, workspace)?;
+            let published = self.publish_path(&m.id, workspace)?;
             return Ok(json!({
                 "state":"enrolled",
                 "team":m.id,
                 "workspace":m.team.workspace,
-                "agents":enrolled,
-                "notice":"This identity already belongs to that team; the workspace's agents are now enrolled in it. Publish an agent to make it visible to teammates."
+                "agents":published,
+                "notice":"This identity already belongs to that team; the workspace's agents now take part in it and are visible to teammates."
             }));
         }
         let authority: EndpointAddr = serde_json::from_value(card.authority.clone())?;
@@ -510,7 +514,11 @@ impl Client {
                 );
                 self.install_team(&t, &authority, &card.secret, path.as_deref().map(Path::new))?;
                 self.db.execute("DELETE FROM joining WHERE id=?", [&team])?;
-                // A checkout waiting on this admission joins the team's agents right away.
+                // The directory that asked to join takes part and is visible; other matching
+                // checkouts are enrolled but stay private.
+                if let Some(path) = &path {
+                    let _ = self.publish_path(&t.id, Path::new(path));
+                }
                 self.enroll_workspace(&t.id)?;
             }
             result["team"] = json!(team);
@@ -1170,12 +1178,13 @@ impl Client {
                 let result = self
                     .create(cmd["repository"].as_str(), Path::new(workspace))
                     .await?;
-                // The session that founds a team from a checkout is part of it.
+                // The session that founds a team is part of it and visible in it.
                 if let Some(via) = cmd["via"].as_str()
                     && valid_label(via).is_ok()
                     && let Some(team) = result["team"].as_str()
                 {
                     let _ = self.enroll(via, true, Some(team));
+                    let _ = self.publish(via, true);
                 }
                 Ok(result)
             }
@@ -1197,13 +1206,14 @@ impl Client {
                         Path::new(workspace),
                     )
                     .await?;
-                // The session that brought the key in is part of the team it named.
+                // The session that brought the key in is part of the team it named, visibly.
                 if let Some(via) = cmd["via"].as_str()
                     && valid_label(via).is_ok()
                     && matches!(result["state"].as_str(), Some("enrolled" | "admitted"))
                     && let Some(team) = result["team"].as_str()
                 {
                     let _ = self.enroll(via, true, Some(team));
+                    let _ = self.publish(via, true);
                 }
                 Ok(result)
             }

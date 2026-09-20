@@ -292,6 +292,16 @@ impl Client {
         }
         Ok(labels)
     }
+    /// A deliberate act by the owner (creating a team from a directory, joining one with a key)
+    /// makes that directory's agents visible to the team: enrolled and published.
+    pub fn publish_path(&self, team: &str, workspace: &Path) -> Result<Vec<String>> {
+        let labels = self.enroll_path(team, workspace)?;
+        for label in &labels {
+            self.db
+                .execute("UPDATE agents SET published=1 WHERE label=?", [label])?;
+        }
+        Ok(labels)
+    }
     /// The team a session acting through `label` may touch, if any.
     pub fn is_enrolled(&self, label: &str) -> Result<Option<String>> {
         Ok(self
