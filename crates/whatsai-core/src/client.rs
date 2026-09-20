@@ -29,7 +29,7 @@ pub struct Client {
 impl Client {
     pub fn open(dir: &Path, name: &str) -> Result<Self> {
         let identity = storage::identity(dir, name)?;
-        let db = storage::database(&dir.join("client.db"), storage::CLIENT_SCHEMA)?;
+        let db = storage::database(&dir.join("client.db"), storage::CLIENT_MIGRATIONS)?;
         db.execute(
             "UPDATE inbox SET dispatch='interrupted' WHERE dispatch='running'",
             [],
@@ -142,7 +142,7 @@ impl Client {
     }
     pub async fn refresh(&self) -> Result<Team> {
         let old = self.team()?;
-        let mut op = json!({"method":"team"});
+        let mut op = json!({"method":"team","agents":self.agent_presence()?});
         if let Some(ep) = self.config("endpoint")? {
             op["endpoint"] = serde_json::from_str(&ep)?;
         }
@@ -331,6 +331,7 @@ impl Client {
         self.save_team(&next, &t.founder)?;
         Ok(json!(next))
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
         &self,
         kind: &str,
@@ -339,12 +340,30 @@ impl Client {
         to: Option<String>,
         reply_to: Option<String>,
         data: Value,
+        agent: Option<String>,
+        to_agent: Option<String>,
     ) -> Result<String> {
         let t = self.team()?;
         let me = self.identity.member()?.id;
         ensure!(t.members.contains_key(&me), "not a current member");
         if let Some(target) = &to {
             ensure!(t.members.contains_key(target), "unknown recipient");
+        }
+        if let Some(label) = &agent {
+            let info = self
+                .agent(label)
+                .context("sending agent is not registered here")?;
+            ensure!(info["retired"] != true, "sending agent is retired");
+        }
+        // A fresh address must name an agent the recipient has published; a reply reuses the
+        // label that just wrote to us, which is evidence enough even if presence lags.
+        if let (Some(label), Some(target), None) = (&to_agent, &to, &reply_to)
+            && let Some(published) = t.agents.get(target).and_then(|a| a.as_array())
+        {
+            ensure!(
+                published.iter().any(|a| a["label"] == *label),
+                "recipient has not published an agent named {label}; run list to see theirs"
+            );
         }
         let eid = id();
         let root = if let Some(reply) = &reply_to {
@@ -363,6 +382,8 @@ impl Client {
             reply_to,
             root,
             data,
+            agent,
+            to_agent,
         };
         event.validate()?;
         let members: Vec<_> = t.members.values().cloned().collect();
@@ -475,10 +496,30 @@ impl Client {
         Ok(())
     }
     pub fn inbox(&self) -> Result<Value> {
-        let mut q = self
-            .db
-            .prepare("SELECT id,seq,event,envelope,dispatch FROM inbox ORDER BY seq")?;
-        let rows = q.query_map([], |r| {
+        self.inbox_for(None, false)
+    }
+    /// The inbox as one agent sees it: everything, or only what is addressed to it or shared,
+    /// optionally only what it has not marked read.
+    pub fn inbox_for(&self, agent: Option<&str>, unread_only: bool) -> Result<Value> {
+        let (cursor, label) = match agent {
+            Some(label) => {
+                valid_label(label)?;
+                let cursor: i64 = self
+                    .db
+                    .query_row("SELECT cursor FROM agents WHERE label=?", [label], |r| {
+                        r.get(0)
+                    })
+                    .optional()?
+                    .context("unknown agent")?;
+                (if unread_only { cursor } else { 0 }, Some(label.to_owned()))
+            }
+            None => (0, None),
+        };
+        let me = self.identity.member()?.id;
+        let mut q = self.db.prepare(
+            "SELECT id,seq,event,envelope,dispatch FROM inbox WHERE seq>?1 AND (?2 IS NULL OR json_extract(event,'$.to_agent') IS NULL OR json_extract(event,'$.to_agent')=?2) AND (?2 IS NULL OR json_extract(event,'$.to') IS NULL OR json_extract(event,'$.to')=?3) ORDER BY seq",
+        )?;
+        let rows = q.query_map(params![cursor, label, me], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
@@ -537,7 +578,7 @@ impl Client {
         }
         Ok(json!(out))
     }
-    pub fn share(&mut self, path: &Path, actor: &str) -> Result<String> {
+    pub fn share(&mut self, path: &Path, actor: &str, agent: Option<String>) -> Result<String> {
         let mut f = std::fs::File::open(path)?;
         let meta = f.metadata()?;
         ensure!(
@@ -571,6 +612,8 @@ impl Client {
                 None,
                 None,
                 serde_json::to_value(&manifest)?,
+                agent,
+                None,
             )?;
             let body: String =
                 self.db
@@ -705,21 +748,21 @@ impl Client {
             json!({"state":"complete","path":dest,"sha256":manifest.sha256,"bytes":manifest.size,"new_chunks":fetched}),
         )
     }
+    /// Latest status per member and per agent, with whether that member is connected now.
     pub fn statuses(&self) -> Result<Value> {
         let inbox = self.inbox()?;
         let mut statuses = BTreeMap::new();
         for v in inbox.as_array().context("invalid inbox")? {
             if v["kind"] == "status" {
-                statuses.insert(
-                    v["sender"].as_str().unwrap_or_default().to_owned(),
-                    v.clone(),
-                );
+                let member = v["sender"].as_str().unwrap_or_default().to_owned();
+                let agent = v["event"]["agent"].as_str().map(str::to_owned);
+                statuses.insert((member, agent), v.clone());
             }
         }
         let t = self.team()?;
         let mut out = vec![];
-        for (member, status) in statuses {
-            out.push(json!({"member":member,"status":status,"connected":t.presence.get(&member).is_some_and(|seen|now()-seen<15)}));
+        for ((member, agent), status) in statuses {
+            out.push(json!({"member":member,"agent":agent,"status":status,"connected":t.presence.get(&member).is_some_and(|seen|now()-seen<15)}));
         }
         Ok(json!(out))
     }
@@ -727,6 +770,8 @@ impl Client {
         let action = field(&cmd, "action")?;
         match action {
             "worker" => self.worker_command(&cmd),
+            "agent" => self.agent_command(&cmd),
+            "agents" => self.agents(),
             "accept-handoff" => {
                 self.accept_handoff(
                     field(&cmd, "event")?,
@@ -744,7 +789,7 @@ impl Client {
                     .collect::<Vec<_>>()
             )),
             "health" => Ok(
-                json!({"version":VERSION,"state":self.dir,"member":self.identity.member()?,"team":self.config("team")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"authority":self.config("authority")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"endpoint":self.config("endpoint")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"last_sync_error":self.config("last_sync_error")?,"last_peer_path":self.config("last_peer_path")?,"last_file_path":self.config("last_file_path")?}),
+                json!({"version":VERSION,"state":self.dir,"agents":self.agent_presence()?,"member":self.identity.member()?,"team":self.config("team")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"authority":self.config("authority")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"endpoint":self.config("endpoint")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"last_sync_error":self.config("last_sync_error")?,"last_peer_path":self.config("last_peer_path")?,"last_file_path":self.config("last_file_path")?}),
             ),
             "register" => Ok(json!(self.identity.member()?)),
             "create" => self.create(field(&cmd, "repository")?).await,
@@ -772,7 +817,10 @@ impl Client {
             "promote" | "demote" | "revoke" => self.govern(action, field(&cmd, "member")?).await,
             "leave" => self.govern("leave", &self.identity.member()?.id).await,
             "sync" => self.sync().await,
-            "inbox" => self.inbox(),
+            "inbox" => self.inbox_for(
+                cmd["agent"].as_str(),
+                cmd["unread"].as_bool().unwrap_or(false),
+            ),
             "outbox" => self.outbox().await,
             "send" | "agent-send" => {
                 let eid = self.enqueue(
@@ -782,11 +830,13 @@ impl Client {
                     cmd["to"].as_str().map(String::from),
                     cmd["reply_to"].as_str().map(String::from),
                     Value::Null,
+                    cmd["agent"].as_str().map(String::from),
+                    cmd["to_agent"].as_str().map(String::from),
                 )?;
                 Ok(json!({"id":eid,"state":"queued"}))
             }
             "share" => Ok(
-                json!({"id":self.share(Path::new(field(&cmd,"path")?),cmd["actor"].as_str().unwrap_or("person"))?,"state":"queued"}),
+                json!({"id":self.share(Path::new(field(&cmd,"path")?),cmd["actor"].as_str().unwrap_or("person"),cmd["agent"].as_str().map(String::from))?,"state":"queued"}),
             ),
             "download" => {
                 self.download(
@@ -809,6 +859,8 @@ impl Client {
                         None,
                         None,
                         json!({"state":state,"branch":cmd["branch"],"commit":cmd["commit"]}),
+                        cmd["agent"].as_str().map(String::from),
+                        None,
                     )?;
                     Ok(json!({"id":eid,"state":"queued"}))
                 } else {
@@ -821,7 +873,7 @@ impl Client {
                     [40, 64].contains(&commit.len()) && hex::decode(commit).is_ok(),
                     "expected full commit hash"
                 );
-                let eid=self.enqueue("handoff",cmd["actor"].as_str().unwrap_or("person"),cmd["description"].as_str().unwrap_or(""),None,None,json!({"repository":self.team()?.id,"commit":commit,"branch":field(&cmd,"branch")?}))?;
+                let eid=self.enqueue("handoff",cmd["actor"].as_str().unwrap_or("person"),cmd["description"].as_str().unwrap_or(""),None,None,json!({"repository":self.team()?.id,"commit":commit,"branch":field(&cmd,"branch")?}),cmd["agent"].as_str().map(String::from),None)?;
                 Ok(json!({"id":eid,"state":"queued"}))
             }
             _ => bail!("unknown local operation"),

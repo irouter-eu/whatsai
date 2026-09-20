@@ -43,9 +43,19 @@ pub fn lock(dir: &Path) -> Result<File> {
         .write(true)
         .mode(0o600)
         .open(dir.join("runtime.lock"))?;
-    f.try_lock_exclusive()
-        .context("another process owns this state directory")?;
-    Ok(f)
+    // A daemon that was just stopped releases its lock a moment after its socket disappears;
+    // give it that moment instead of failing a restart that raced it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match f.try_lock_exclusive() {
+            Ok(()) => return Ok(f),
+            Err(e) if std::time::Instant::now() < deadline => {
+                let _ = e;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(e).context("another process owns this state directory"),
+        }
+    }
 }
 pub fn identity(dir: &Path, name: &str) -> Result<Identity> {
     private_dir(dir)?;
@@ -63,7 +73,8 @@ pub fn identity(dir: &Path, name: &str) -> Result<Identity> {
     write_private(&p, &serde_json::to_vec_pretty(&i)?)?;
     Ok(i)
 }
-pub fn database(path: &Path, ddl: &str) -> Result<Connection> {
+/// Open a database and bring it to the newest schema. `migrations[i]` takes user_version i to i+1.
+pub fn database(path: &Path, migrations: &[&str]) -> Result<Connection> {
     if !path.exists() {
         OpenOptions::new()
             .write(true)
@@ -75,46 +86,31 @@ pub fn database(path: &Path, ddl: &str) -> Result<Connection> {
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
     ensure!(
-        version <= 1,
+        version as usize <= migrations.len(),
         "unsupported database version {version}; restore a compatible backup"
     );
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
-    if version == 0 {
+    for (index, ddl) in migrations.iter().enumerate().skip(version as usize) {
+        let next = index + 1;
         c.execute_batch(&format!(
-            "BEGIN IMMEDIATE;{ddl} PRAGMA user_version=1;COMMIT;"
+            "BEGIN IMMEDIATE;{ddl} PRAGMA user_version={next};COMMIT;"
         ))?;
     }
     Ok(c)
 }
-/// The state directory for a harness: `WHATSAI_STATE` wins; otherwise each harness (and the
-/// plain CLI) gets its own directory under the base, so one machine can hold one identity per
-/// coding agent and they join a team as distinct members.
-pub fn default_state_for(harness: Option<&str>) -> Result<PathBuf> {
-    if let Some(explicit) = std::env::var_os("WHATSAI_STATE") {
-        return Ok(PathBuf::from(explicit));
-    }
-    let harness = harness
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-        .unwrap_or("cli");
-    ensure!(
-        harness.len() <= 32
-            && harness
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-        "invalid harness name {harness:?}: use letters, digits, '-' or '_'"
-    );
-    Ok(base_state().join(harness))
+/// One member per person per machine: `WHATSAI_STATE` or `~/.local/share/whatsai`. Agents and
+/// sessions live inside that one identity rather than getting directories of their own.
+pub fn default_state() -> PathBuf {
+    std::env::var_os("WHATSAI_STATE")
+        .map(PathBuf::from)
+        .unwrap_or_else(base_state)
 }
 pub fn base_state() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()))
         .join(".local/share/whatsai")
 }
-pub fn default_state() -> Result<PathBuf> {
-    let harness = std::env::var("WHATSAI_HARNESS").ok();
-    default_state_for(harness.as_deref())
-}
-pub const CLIENT_SCHEMA: &str = r#"
+pub const CLIENT_MIGRATIONS: &[&str] = &[CLIENT_SCHEMA_V1, CLIENT_SCHEMA_V2];
+const CLIENT_SCHEMA_V1: &str = r#"
 CREATE TABLE config(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE outbox(id TEXT PRIMARY KEY,envelope TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'queued',error TEXT);
 CREATE TABLE inbox(id TEXT PRIMARY KEY,seq INTEGER NOT NULL,event TEXT NOT NULL,envelope TEXT NOT NULL,dispatch TEXT NOT NULL DEFAULT 'pending');
@@ -122,4 +118,13 @@ CREATE TABLE chunks(file TEXT NOT NULL,idx INTEGER NOT NULL,envelope TEXT NOT NU
 CREATE TABLE downloads(file TEXT NOT NULL,idx INTEGER NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(file,idx));
 CREATE TABLE budgets(root TEXT PRIMARY KEY,used INTEGER NOT NULL);
 CREATE TABLE invites(hash TEXT PRIMARY KEY,expires INTEGER NOT NULL);
+"#;
+/// Durable agents keyed by harness and workspace, ephemeral sessions attached to them, and
+/// per-agent worker bindings, read cursors and reply budgets.
+const CLIENT_SCHEMA_V2: &str = r#"
+CREATE TABLE agents(label TEXT PRIMARY KEY,harness TEXT NOT NULL,workspace TEXT NOT NULL,repository TEXT,created INTEGER NOT NULL,last_seen INTEGER NOT NULL,retired INTEGER NOT NULL DEFAULT 0,worker TEXT,cursor INTEGER NOT NULL DEFAULT 0,UNIQUE(harness,workspace));
+CREATE TABLE sessions(lease TEXT PRIMARY KEY,agent TEXT NOT NULL REFERENCES agents(label) ON DELETE CASCADE,session TEXT,pid INTEGER,started INTEGER NOT NULL,heartbeat INTEGER NOT NULL);
+DROP TABLE budgets;
+CREATE TABLE budgets(agent TEXT NOT NULL,root TEXT NOT NULL,used INTEGER NOT NULL,PRIMARY KEY(agent,root));
+DELETE FROM config WHERE key='worker';
 "#;

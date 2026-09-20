@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -78,6 +78,9 @@ pub struct Team {
     pub history: Vec<Signed<Governance>>,
     pub presence: BTreeMap<String, i64>,
     pub endpoints: BTreeMap<String, Value>,
+    /// Each member's published agents: label, harness, workspace name, repository, online, last_seen.
+    #[serde(default)]
+    pub agents: BTreeMap<String, Value>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Header {
@@ -109,6 +112,12 @@ pub struct Event {
     pub reply_to: Option<String>,
     pub root: String,
     pub data: Value,
+    /// The sender's agent label (`harness@workspace`), when an agent rather than the person wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// One of the recipient's agents; unset means the person and every agent of theirs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_agent: Option<String>,
 }
 impl Event {
     pub fn validate(&self) -> Result<()> {
@@ -121,8 +130,42 @@ impl Event {
         if let Some(x) = &self.reply_to {
             valid_id(x)?;
         }
+        if let Some(label) = &self.agent {
+            valid_label(label)?;
+        }
+        if let Some(label) = &self.to_agent {
+            valid_label(label)?;
+            ensure!(self.to.is_some(), "an agent address needs a member address");
+        }
         Ok(())
     }
+}
+/// Agent labels are `harness@workspace`, short and safe to print anywhere.
+pub fn valid_label(label: &str) -> Result<()> {
+    let (harness, workspace) = label
+        .split_once('@')
+        .context("agent label must be harness@workspace")?;
+    valid_harness(harness)?;
+    ensure!(
+        !workspace.is_empty()
+            && workspace.len() <= 48
+            && workspace
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')),
+        "invalid workspace name in agent label"
+    );
+    Ok(())
+}
+pub fn valid_harness(harness: &str) -> Result<()> {
+    ensure!(
+        !harness.is_empty()
+            && harness.len() <= 32
+            && harness
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_')),
+        "invalid harness name {harness:?}: use lowercase letters, digits, '-' or '_'"
+    );
+    Ok(())
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Manifest {

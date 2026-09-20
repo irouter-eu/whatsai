@@ -4,12 +4,9 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(version, about = "Private teamwork for people and their coding agents")]
 struct Args {
-    /// State directory; defaults to ~/.local/share/whatsai/<harness>.
+    /// State directory; defaults to ~/.local/share/whatsai, one identity per person per machine.
     #[arg(long, env = "WHATSAI_STATE", global = true)]
     state: Option<PathBuf>,
-    /// Which coding agent this command acts for (claude, codex, ...); picks the default state directory.
-    #[arg(long, env = "WHATSAI_HARNESS", global = true)]
-    harness: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -27,9 +24,24 @@ enum Command {
     Invite,
     List,
     Requests,
-    Inbox,
+    /// Read the inbox, optionally as one agent sees it.
+    Inbox {
+        /// Only messages addressed to this agent or shared with everyone.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Only what that agent has not marked read.
+        #[arg(long, requires = "agent")]
+        unread: bool,
+    },
     Outbox,
     Files,
+    /// Agents registered under this identity and their live sessions.
+    Agents,
+    /// Manage one agent: harness@workspace participants that outlive sessions.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     Worker {
         #[command(subcommand)]
         command: WorkerCommand,
@@ -69,17 +81,27 @@ enum Command {
     Leave,
     Send {
         text: String,
+        /// Recipient member fingerprint.
         #[arg(long)]
         to: Option<String>,
+        /// One of the recipient's agents, e.g. claude@repo; needs --to.
+        #[arg(long, requires = "to")]
+        to_agent: Option<String>,
         #[arg(long)]
         reply_to: Option<String>,
+        /// Label the message as written by an agent.
         #[arg(long)]
         agent: bool,
+        /// Send as this local agent (implies --agent).
+        #[arg(long = "as")]
+        as_agent: Option<String>,
     },
     Share {
         path: PathBuf,
         #[arg(long)]
         agent: bool,
+        #[arg(long = "as")]
+        as_agent: Option<String>,
     },
     Download {
         file: String,
@@ -97,6 +119,9 @@ enum Command {
         branch: Option<String>,
         #[arg(long)]
         commit: Option<String>,
+        /// Report status for this local agent rather than yourself.
+        #[arg(long = "as")]
+        as_agent: Option<String>,
     },
     Handoff {
         #[arg(long)]
@@ -105,24 +130,85 @@ enum Command {
         commit: String,
         #[arg(long)]
         description: Option<String>,
+        #[arg(long = "as")]
+        as_agent: Option<String>,
     },
     /// Structured local adapter API; request must be passed on standard input.
     Rpc,
 }
 #[derive(Subcommand)]
-enum WorkerCommand {
-    Bind {
+enum AgentCommand {
+    /// Register a session for a harness in a workspace, creating the agent on first use.
+    Attach {
         #[arg(long)]
         harness: String,
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
         #[arg(long)]
-        cwd: PathBuf,
+        session: Option<String>,
+        #[arg(long)]
+        pid: Option<i64>,
+    },
+    Heartbeat {
+        lease: String,
+    },
+    Detach {
+        lease: String,
+    },
+    Show {
+        agent: String,
+    },
+    /// Stop offering this agent to the team; its history stays.
+    Retire {
+        agent: String,
+    },
+    /// Move an agent to another checkout so its label and queue follow the work.
+    Adopt {
+        agent: String,
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+    /// Unread counts for an agent, by label or by harness and workspace.
+    Unread {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, required_unless_present = "agent")]
+        harness: Option<String>,
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+    },
+    MarkRead {
+        agent: String,
+    },
+}
+#[derive(Subcommand)]
+enum WorkerCommand {
+    /// Bind an automatic-reply worker to an agent; harness and cwd default to the agent's own.
+    Bind {
+        #[arg(long)]
+        agent: String,
         #[arg(long)]
         adapter: PathBuf,
+        #[arg(long)]
+        harness: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Also answer messages sent to you with no agent named.
+        #[arg(long)]
+        default: bool,
     },
-    Enable,
-    Pause,
+    Enable {
+        agent: String,
+    },
+    Pause {
+        agent: String,
+    },
+    Unbind {
+        agent: String,
+    },
     Status,
     Reset {
+        agent: String,
         root: String,
     },
 }
@@ -138,10 +224,9 @@ fn default_name() -> String {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let state = match args.state {
-        Some(state) => state,
-        None => whatsai_core::storage::default_state_for(args.harness.as_deref())?,
-    };
+    let state = args
+        .state
+        .unwrap_or_else(whatsai_core::storage::default_state);
     let command = match args.command {
         Command::Start { name } => {
             if let Ok(result) =
@@ -210,19 +295,64 @@ async fn main() -> anyhow::Result<()> {
         } => {
             json!({"action":"accept-handoff","event":event,"repo":std::fs::canonicalize(repo)?,"directory":if directory.is_absolute(){directory}else{std::env::current_dir()?.join(directory)}})
         }
+        Command::Agents => json!({"action":"agents"}),
+        Command::Agent { command } => match command {
+            AgentCommand::Attach {
+                harness,
+                workspace,
+                session,
+                pid,
+            } => {
+                json!({"action":"agent","operation":"attach","harness":harness,"workspace":std::fs::canonicalize(workspace)?,"session":session,"pid":pid})
+            }
+            AgentCommand::Heartbeat { lease } => {
+                json!({"action":"agent","operation":"heartbeat","lease":lease})
+            }
+            AgentCommand::Detach { lease } => {
+                json!({"action":"agent","operation":"detach","lease":lease})
+            }
+            AgentCommand::Show { agent } => {
+                json!({"action":"agent","operation":"show","agent":agent})
+            }
+            AgentCommand::Retire { agent } => {
+                json!({"action":"agent","operation":"retire","agent":agent})
+            }
+            AgentCommand::Adopt { agent, workspace } => {
+                json!({"action":"agent","operation":"adopt","agent":agent,"workspace":std::fs::canonicalize(workspace)?})
+            }
+            AgentCommand::Unread {
+                agent,
+                harness,
+                workspace,
+            } => {
+                json!({"action":"agent","operation":"unread","agent":agent,"harness":harness,"workspace":std::fs::canonicalize(workspace)?})
+            }
+            AgentCommand::MarkRead { agent } => {
+                json!({"action":"agent","operation":"mark-read","agent":agent})
+            }
+        },
         Command::Worker { command } => match command {
             WorkerCommand::Bind {
+                agent,
+                adapter,
                 harness,
                 cwd,
-                adapter,
+                default,
             } => {
-                json!({"action":"worker","operation":"bind","harness":harness,"cwd":std::fs::canonicalize(cwd)?,"adapter":std::fs::canonicalize(adapter)?})
+                json!({"action":"worker","operation":"bind","agent":agent,"harness":harness,"cwd":cwd.map(std::fs::canonicalize).transpose()?,"adapter":std::fs::canonicalize(adapter)?,"default":default})
             }
-            WorkerCommand::Enable => json!({"action":"worker","operation":"enable"}),
-            WorkerCommand::Pause => json!({"action":"worker","operation":"pause"}),
+            WorkerCommand::Enable { agent } => {
+                json!({"action":"worker","operation":"enable","agent":agent})
+            }
+            WorkerCommand::Pause { agent } => {
+                json!({"action":"worker","operation":"pause","agent":agent})
+            }
+            WorkerCommand::Unbind { agent } => {
+                json!({"action":"worker","operation":"unbind","agent":agent})
+            }
             WorkerCommand::Status => json!({"action":"worker","operation":"status"}),
-            WorkerCommand::Reset { root } => {
-                json!({"action":"worker","operation":"reset","root":root})
+            WorkerCommand::Reset { agent, root } => {
+                json!({"action":"worker","operation":"reset","agent":agent,"root":root})
             }
         },
         Command::Register => json!({"action":"register"}),
@@ -232,7 +362,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Invite => json!({"action":"invite"}),
         Command::List => json!({"action":"list"}),
         Command::Requests => json!({"action":"requests"}),
-        Command::Inbox => json!({"action":"inbox"}),
+        Command::Inbox { agent, unread } => json!({"action":"inbox","agent":agent,"unread":unread}),
         Command::Outbox => json!({"action":"outbox"}),
         Command::Create { repository } => json!({"action":"create","repository":repository}),
         Command::Join { key } => json!({"action":"join","key":key}),
@@ -246,13 +376,19 @@ async fn main() -> anyhow::Result<()> {
         Command::Send {
             text,
             to,
+            to_agent,
             reply_to,
             agent,
+            as_agent,
         } => {
-            json!({"action":if agent{"agent-send"}else{"send"},"text":text,"to":to,"reply_to":reply_to})
+            json!({"action":if agent||as_agent.is_some(){"agent-send"}else{"send"},"text":text,"to":to,"to_agent":to_agent,"reply_to":reply_to,"agent":as_agent})
         }
-        Command::Share { path, agent } => {
-            json!({"action":"share","path":std::fs::canonicalize(path)?,"actor":if agent{"agent"}else{"person"}})
+        Command::Share {
+            path,
+            agent,
+            as_agent,
+        } => {
+            json!({"action":"share","path":std::fs::canonicalize(path)?,"actor":if agent||as_agent.is_some(){"agent"}else{"person"},"agent":as_agent})
         }
         Command::Download {
             file,
@@ -266,14 +402,18 @@ async fn main() -> anyhow::Result<()> {
             description,
             branch,
             commit,
+            as_agent,
         } => {
-            json!({"action":"status","state":work_state,"description":description,"branch":branch,"commit":commit})
+            json!({"action":"status","state":work_state,"description":description,"branch":branch,"commit":commit,"actor":if as_agent.is_some(){"agent"}else{"person"},"agent":as_agent})
         }
         Command::Handoff {
             branch,
             commit,
             description,
-        } => json!({"action":"handoff","branch":branch,"commit":commit,"description":description}),
+            as_agent,
+        } => {
+            json!({"action":"handoff","branch":branch,"commit":commit,"description":description,"actor":if as_agent.is_some(){"agent"}else{"person"},"agent":as_agent})
+        }
         Command::Rpc => {
             use std::io::Read;
             let mut bytes = vec![];

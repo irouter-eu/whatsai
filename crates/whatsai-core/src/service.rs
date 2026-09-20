@@ -3,7 +3,8 @@ use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Mutex};
-const SCHEMA: &str = r#"
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, "ALTER TABLE presence ADD COLUMN agents TEXT;"];
+const SCHEMA_V1: &str = r#"
 CREATE TABLE teams(id TEXT PRIMARY KEY,founder TEXT NOT NULL,secret TEXT NOT NULL,history TEXT NOT NULL);
 CREATE TABLE requests(team TEXT NOT NULL,member TEXT NOT NULL,body TEXT NOT NULL,state TEXT NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(team,member));
 CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,team TEXT NOT NULL,sender TEXT NOT NULL,envelope TEXT NOT NULL,expires INTEGER NOT NULL);
@@ -20,7 +21,7 @@ impl Service {
     pub fn open(dir: &Path, quota: usize) -> Result<Self> {
         storage::private_dir(dir)?;
         Ok(Self {
-            db: Mutex::new(storage::database(&dir.join("service.db"), SCHEMA)?),
+            db: Mutex::new(storage::database(&dir.join("service.db"), MIGRATIONS)?),
             quota,
         })
     }
@@ -129,7 +130,7 @@ impl Service {
         ensure!(team.members.contains_key(who), "membership denied");
         match method {
             "team" => {
-                db.execute("INSERT INTO presence(team,member,seen,endpoint) VALUES(?,?,?,?) ON CONFLICT(team,member) DO UPDATE SET seen=excluded.seen,endpoint=COALESCE(excluded.endpoint,presence.endpoint)",params![team_id,who,now(),op.get("endpoint").map(serde_json::to_string).transpose()?])?;
+                db.execute("INSERT INTO presence(team,member,seen,endpoint,agents) VALUES(?,?,?,?,?) ON CONFLICT(team,member) DO UPDATE SET seen=excluded.seen,endpoint=COALESCE(excluded.endpoint,presence.endpoint),agents=COALESCE(excluded.agents,presence.agents)",params![team_id,who,now(),op.get("endpoint").map(serde_json::to_string).transpose()?,op.get("agents").filter(|a|a.is_array()).map(serde_json::to_string).transpose()?])?;
                 team = load_team(db, team_id)?;
                 Ok(json!(team))
             }
@@ -394,20 +395,25 @@ fn load_team(db: &Connection, id: &str) -> Result<Team> {
         &serde_json::from_str::<Vec<Signed<Governance>>>(&history)?,
         &founder,
     )?;
-    let mut q = db.prepare("SELECT member,seen,endpoint FROM presence WHERE team=?")?;
+    let mut q = db.prepare("SELECT member,seen,endpoint,agents FROM presence WHERE team=?")?;
     let rows = q.query_map([id], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, i64>(1)?,
             r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
         ))
     })?;
     for row in rows {
-        let (member, seen, endpoint) = row?;
+        let (member, seen, endpoint, agents) = row?;
         if t.members.contains_key(&member) {
             t.presence.insert(member.clone(), seen);
             if let Some(e) = endpoint {
-                t.endpoints.insert(member, serde_json::from_str(&e)?);
+                t.endpoints
+                    .insert(member.clone(), serde_json::from_str(&e)?);
+            }
+            if let Some(a) = agents {
+                t.agents.insert(member, serde_json::from_str(&a)?);
             }
         }
     }

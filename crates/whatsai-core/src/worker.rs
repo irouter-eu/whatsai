@@ -1,6 +1,7 @@
+//! Automatic replies: one optional worker per agent, answering messages addressed to that agent.
 use crate::{client::Client, protocol::*, service::field};
 use anyhow::{Context, Result, ensure};
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{path::Path, process::Stdio, time::Duration};
@@ -14,115 +15,188 @@ pub struct Binding {
     pub limit: i64,
     pub timeout_secs: u64,
     pub session: Option<String>,
+    /// Also answer messages sent to the member with no agent named.
+    #[serde(default)]
+    pub default: bool,
 }
 #[derive(Clone)]
 pub struct Work {
     pub event: String,
     pub sender: String,
+    pub sender_agent: Option<String>,
+    pub agent: String,
     pub binding: Binding,
     pub prompt: String,
 }
 impl Client {
+    fn binding(&self, agent: &str) -> Result<Option<Binding>> {
+        let raw: Option<Option<String>> = self
+            .db
+            .query_row("SELECT worker FROM agents WHERE label=?", [agent], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        match raw {
+            None => anyhow::bail!("unknown agent {agent}"),
+            Some(None) => Ok(None),
+            Some(Some(json)) => Ok(Some(serde_json::from_str(&json)?)),
+        }
+    }
+    fn save_binding(&self, agent: &str, binding: Option<&Binding>) -> Result<()> {
+        let json = binding.map(serde_json::to_string).transpose()?;
+        let n = self.db.execute(
+            "UPDATE agents SET worker=? WHERE label=? AND retired=0",
+            params![json, agent],
+        )?;
+        ensure!(n == 1, "unknown or retired agent {agent}");
+        Ok(())
+    }
     pub fn worker_command(&self, cmd: &Value) -> Result<Value> {
         let op = field(cmd, "operation")?;
-        if op == "bind" {
-            let harness = field(cmd, "harness")?;
-            ensure!(
-                ["codex", "claude"].contains(&harness),
-                "unsupported harness"
+        if op == "status" {
+            let mut q = self.db.prepare(
+                "SELECT label,worker FROM agents WHERE worker IS NOT NULL ORDER BY label",
+            )?;
+            let rows = q.query_map([], |r| {
+                Ok(json!({"agent":r.get::<_,String>(0)?,"binding":serde_json::from_str::<Value>(&r.get::<_,String>(1)?).unwrap_or_default()}))
+            })?;
+            return Ok(
+                json!({"workers":rows.collect::<rusqlite::Result<Vec<_>>>()?,"last_error":self.config("worker_error")?}),
             );
-            let cwd = std::fs::canonicalize(field(cmd, "cwd")?)?;
-            ensure!(cwd.is_dir(), "worker cwd is not a directory");
-            let adapter = std::fs::canonicalize(field(cmd, "adapter")?)?;
-            ensure!(
-                adapter.is_file(),
-                "worker adapter is missing; build adapters first"
-            );
-            let b = Binding {
-                harness: harness.into(),
-                cwd: cwd.to_string_lossy().into(),
-                adapter: adapter.to_string_lossy().into(),
-                enabled: false,
-                limit: 3,
-                timeout_secs: 120,
-                session: None,
-            };
-            self.set("worker", &serde_json::to_string(&b)?)?;
-        } else if op == "enable" || op == "pause" {
-            let mut b: Binding =
-                serde_json::from_str(&self.config("worker")?.context("bind a worker first")?)?;
-            b.enabled = op == "enable";
-            self.set("worker", &serde_json::to_string(&b)?)?;
-        } else if op == "reset" {
-            let root = field(cmd, "root")?;
-            valid_id(root)?;
-            self.db
-                .execute("DELETE FROM budgets WHERE root=?", [root])?;
-            self.db.execute("UPDATE inbox SET dispatch='pending' WHERE dispatch='budget-exhausted' AND json_extract(event,'$.root')=?",[root])?;
-        } else {
-            ensure!(op == "status", "unknown worker operation");
+        }
+        let agent = field(cmd, "agent")?;
+        valid_label(agent)?;
+        let info = self.agent(agent)?;
+        ensure!(info["retired"] != true, "agent is retired");
+        match op {
+            "bind" => {
+                let harness = cmd["harness"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| info["harness"].as_str().unwrap_or_default().to_owned());
+                ensure!(
+                    ["codex", "claude"].contains(&harness.as_str()),
+                    "unsupported worker harness {harness}; bind with --harness codex or claude"
+                );
+                let cwd = std::fs::canonicalize(
+                    cmd["cwd"]
+                        .as_str()
+                        .unwrap_or_else(|| info["workspace"].as_str().unwrap_or_default()),
+                )?;
+                ensure!(cwd.is_dir(), "worker cwd is not a directory");
+                let adapter = std::fs::canonicalize(field(cmd, "adapter")?)?;
+                ensure!(
+                    adapter.is_file(),
+                    "worker adapter is missing; build adapters first"
+                );
+                self.save_binding(
+                    agent,
+                    Some(&Binding {
+                        harness,
+                        cwd: cwd.to_string_lossy().into(),
+                        adapter: adapter.to_string_lossy().into(),
+                        enabled: false,
+                        limit: cmd["limit"].as_i64().unwrap_or(3),
+                        timeout_secs: cmd["timeout_secs"].as_u64().unwrap_or(120),
+                        session: None,
+                        default: cmd["default"].as_bool().unwrap_or(false),
+                    }),
+                )?;
+            }
+            "enable" | "pause" => {
+                let mut b = self
+                    .binding(agent)?
+                    .context("bind a worker to this agent first")?;
+                b.enabled = op == "enable";
+                self.save_binding(agent, Some(&b))?;
+            }
+            "unbind" => self.save_binding(agent, None)?,
+            "reset" => {
+                let root = field(cmd, "root")?;
+                valid_id(root)?;
+                self.db.execute(
+                    "DELETE FROM budgets WHERE agent=? AND root=?",
+                    params![agent, root],
+                )?;
+                self.db.execute("UPDATE inbox SET dispatch='pending' WHERE dispatch='budget-exhausted' AND json_extract(event,'$.root')=?",[root])?;
+            }
+            other => anyhow::bail!("unknown worker operation {other}"),
         }
         Ok(
-            json!({"binding":self.config("worker")?.map(|x|serde_json::from_str::<Value>(&x)).transpose()?,"last_error":self.config("worker_error")?}),
+            json!({"agent":agent,"binding":self.binding(agent)?.map(serde_json::to_value).transpose()?,"last_error":self.config("worker_error")?}),
         )
     }
+    /// Claim the next message for any enabled worker, one at a time, charging that agent's budget.
     pub fn claim_work(&mut self) -> Result<Option<Work>> {
-        let Some(binding) = self.config("worker")? else {
-            return Ok(None);
-        };
-        let binding: Binding = serde_json::from_str(&binding)?;
-        if !binding.enabled {
-            return Ok(None);
-        };
         let team = self.team()?;
         let me = self.identity.member()?.id;
         ensure!(team.members.contains_key(&me), "membership denied");
-        let row:Option<(String,String,String)>=self.db.query_row("SELECT id,event,envelope FROM inbox WHERE dispatch='pending' AND json_extract(event,'$.to')=? ORDER BY seq LIMIT 1",[&me],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        let Some((eid, text, envelope)) = row else {
-            return Ok(None);
-        };
-        let event: Event = serde_json::from_str(&text)?;
-        let env: Signed<Sealed> = serde_json::from_str(&envelope)?;
-        if env.signer == me
-            || !team.members.contains_key(&env.signer)
-            || env.body.header.kind != "message"
-        {
-            self.db
-                .execute("UPDATE inbox SET dispatch='ignored' WHERE id=?", [eid])?;
-            return Ok(None);
-        }
-        let tx = self.db.transaction()?;
-        let used: i64 = tx
-            .query_row(
-                "SELECT used FROM budgets WHERE root=?",
-                [&event.root],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        if used >= binding.limit {
+        let bound: Vec<(String, String)> = self
+            .db
+            .prepare("SELECT label,worker FROM agents WHERE worker IS NOT NULL AND retired=0 ORDER BY label")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (agent, raw) in bound {
+            let binding: Binding = serde_json::from_str(&raw)?;
+            if !binding.enabled {
+                continue;
+            }
+            let row:Option<(String,String,String)>=self.db.query_row(
+                "SELECT id,event,envelope FROM inbox WHERE dispatch='pending' AND json_extract(event,'$.to')=?1 AND (json_extract(event,'$.to_agent')=?2 OR (?3 AND json_extract(event,'$.to_agent') IS NULL)) ORDER BY seq LIMIT 1",
+                params![me,agent,binding.default],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            let Some((eid, text, envelope)) = row else {
+                continue;
+            };
+            let event: Event = serde_json::from_str(&text)?;
+            let env: Signed<Sealed> = serde_json::from_str(&envelope)?;
+            if env.signer == me
+                || !team.members.contains_key(&env.signer)
+                || env.body.header.kind != "message"
+            {
+                self.db
+                    .execute("UPDATE inbox SET dispatch='ignored' WHERE id=?", [eid])?;
+                continue;
+            }
+            let tx = self.db.transaction()?;
+            let used: i64 = tx
+                .query_row(
+                    "SELECT used FROM budgets WHERE agent=? AND root=?",
+                    params![agent, event.root],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            if used >= binding.limit {
+                tx.execute(
+                    "UPDATE inbox SET dispatch='budget-exhausted' WHERE id=?",
+                    [&eid],
+                )?;
+                tx.commit()?;
+                continue;
+            }
             tx.execute(
-                "UPDATE inbox SET dispatch='budget-exhausted' WHERE id=?",
-                [eid],
+                "INSERT INTO budgets VALUES(?,?,1) ON CONFLICT(agent,root) DO UPDATE SET used=used+1",
+                params![agent, event.root],
             )?;
+            tx.execute("UPDATE inbox SET dispatch='running' WHERE id=?", [&eid])?;
             tx.commit()?;
-            return Ok(None);
+            let from = match &event.agent {
+                Some(label) => format!("{} via {label}", env.signer),
+                None => env.signer.clone(),
+            };
+            return Ok(Some(Work {
+                event: eid,
+                sender: env.signer.clone(),
+                sender_agent: event.agent.clone(),
+                prompt: format!(
+                    "Message from team member {from} ({}) to you as {agent}:\n{}",
+                    event.actor, event.text
+                ),
+                agent,
+                binding,
+            }));
         }
-        tx.execute(
-            "INSERT INTO budgets VALUES(?,1) ON CONFLICT(root) DO UPDATE SET used=used+1",
-            [&event.root],
-        )?;
-        tx.execute("UPDATE inbox SET dispatch='running' WHERE id=?", [&eid])?;
-        tx.commit()?;
-        Ok(Some(Work {
-            event: eid,
-            sender: env.signer.clone(),
-            binding,
-            prompt: format!(
-                "Message from team member {} ({}):\n{}",
-                env.signer, event.actor, event.text
-            ),
-        }))
+        Ok(None)
     }
     pub fn finish_work(&self, work: &Work, result: Result<Value>) -> Result<()> {
         let result = result.and_then(|reply| {
@@ -142,20 +216,20 @@ impl Client {
                         Some(work.sender.clone()),
                         Some(work.event.clone()),
                         Value::Null,
+                        Some(work.agent.clone()),
+                        work.sender_agent.clone(),
                     )?;
                     self.db.execute(
                         "UPDATE inbox SET dispatch='replied' WHERE id=?",
                         [&work.event],
                     )?;
-                    // Preserve changes to enabled/pause made while the model was running.
-                    let mut current: Binding = serde_json::from_str(
-                        &self
-                            .config("worker")?
-                            .context("worker unbound during turn")?,
-                    )?;
-                    if current.harness == work.binding.harness && current.cwd == work.binding.cwd {
+                    // Preserve enable/pause changes made while the model was running.
+                    if let Some(mut current) = self.binding(&work.agent)?
+                        && current.harness == work.binding.harness
+                        && current.cwd == work.binding.cwd
+                    {
                         current.session = reply["session"].as_str().map(String::from);
-                        self.set("worker", &serde_json::to_string(&current)?)?;
+                        self.save_binding(&work.agent, Some(&current))?;
                     }
                     self.set("worker_error", "")?;
                     Ok(())
@@ -207,7 +281,7 @@ pub async fn execute(work: &Work) -> Result<Value> {
         .process_group(0)
         .spawn()?;
     let _group = ProcessGroup(process.id().context("worker process did not start")?);
-    let input = json!({"harness":work.binding.harness,"cwd":work.binding.cwd,"session":work.binding.session,"prompt":work.prompt,"timeout_ms":work.binding.timeout_secs*1000});
+    let input = json!({"harness":work.binding.harness,"cwd":work.binding.cwd,"session":work.binding.session,"prompt":work.prompt,"timeout_ms":work.binding.timeout_secs*1000,"agent":work.agent});
     let mut stdin = process.stdin.take().context("worker stdin unavailable")?;
     stdin.write_all(&serde_json::to_vec(&input)?).await?;
     drop(stdin);

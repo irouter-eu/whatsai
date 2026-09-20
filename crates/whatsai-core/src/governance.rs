@@ -14,6 +14,7 @@ pub fn replay(history: &[Signed<Governance>], founder: &str) -> Result<Team> {
         history: vec![],
         presence: BTreeMap::new(),
         endpoints: BTreeMap::new(),
+        agents: BTreeMap::new(),
     };
     valid_id(&team.id)?;
     let mut previous = String::new();

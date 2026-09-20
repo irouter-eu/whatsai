@@ -67,6 +67,26 @@ def main():
    print('PASS 32 MiB direct file, restart/resume, corrupted-cache recovery, hash verification, no overwrite',flush=True)
    cli('bob','status','--set','blocked','--description','Waiting for review');cli('bob','sync');cli('charlie','sync')
    assert any(x['member']==bob for x in cli('charlie','status'))
+   # Agents: durable per harness and checkout, addressable by label, with per-agent unread cursors.
+   ws=base/'bob-work/app';ws.mkdir(parents=True)
+   attached=rpc('bob',{'action':'agent','operation':'attach','harness':'claude','workspace':str(ws),'session':'s1','pid':1})
+   claude_label=attached['agent']['label'];assert claude_label=='claude@app',claude_label
+   assert rpc('bob',{'action':'agent','operation':'attach','harness':'codex','workspace':str(ws)})['agent']['label']=='codex@app'
+   cli('bob','sync');cli('charlie','sync')
+   published=cli('charlie','list')['agents'][bob];assert {a['label'] for a in published}=={'claude@app','codex@app'} and all('workspace' in a and '/' not in a['workspace'] for a in published)
+   assert cli('charlie','send','wrong label','--to',bob,'--to-agent','claude@nowhere',check=False).returncode!=0
+   cli('charlie','send','for claude only','--to',bob,'--to-agent',claude_label);cli('charlie','send','for everyone');cli('charlie','sync');cli('bob','sync')
+   claude_unread=cli('bob','agent','unread','--agent',claude_label);codex_unread=cli('bob','agent','unread','--agent','codex@app')
+   assert (claude_unread['addressed'],codex_unread['addressed'])==(1,0),(claude_unread,codex_unread)
+   assert claude_unread['shared']>=1
+   assert all(x['event'].get('to_agent') in (None,claude_label) for x in cli('bob','inbox','--agent',claude_label))
+   cli('bob','agent','mark-read',claude_label);assert cli('bob','agent','unread','--agent',claude_label)['addressed']==0
+   assert cli('bob','agent','unread','--agent','codex@app')['shared']>=1,'cursors are per agent'
+   cli('bob','status','--set','ready','--as',claude_label,'--description','Agent status');cli('bob','sync');cli('charlie','sync')
+   assert any(x['member']==bob and x['agent']==claude_label for x in cli('charlie','status'))
+   cli('bob','agent','detach',attached['lease']);cli('bob','agent','retire','codex@app');cli('bob','sync');cli('charlie','sync')
+   assert [a['label'] for a in cli('charlie','list')['agents'][bob]]==['claude@app'],'retired agents leave the roster; offline ones stay'
+   print('PASS agents are durable, addressable by label, published without paths, with per-agent unread and status',flush=True)
    # A second download keeps an incomplete cache for the revocation gate.
    small=base/'second.bin';small.write_bytes(content[:2*1024*1024]);fid2=cli('bob','share',str(small))['id'];cli('bob','sync');cli('charlie','sync')
    cli('charlie','download',fid2,'--directory',str(downloads),'--max-chunks','1')

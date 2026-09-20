@@ -65,6 +65,8 @@ async fn exact_commit_handoff_preserves_dirty_tree() {
         reply_to: None,
         root: eid.clone(),
         data: json!({"repository":tid,"branch":"main","commit":commit}),
+        agent: None,
+        to_agent: None,
     };
     let h = Header {
         version: VERSION,

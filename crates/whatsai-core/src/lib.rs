@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod client;
 pub mod crypto;
 pub mod daemon;

@@ -113,9 +113,15 @@ claude --plugin-dir ./plugins/whatsai
 
 The plugin supplies skills such as `/whatsai:create`, `/whatsai:join`, `/whatsai:requests`, `/whatsai:approve`, `/whatsai:send`, and `/whatsai:inbox`. Plugin loading depends on the installed harness's plugin support; the CLI is the stable fallback.
 
-Each coding agent gets its own identity: the Claude plugin uses `~/.local/share/whatsai/claude`, the Codex plugin `~/.local/share/whatsai/codex`, and the plain CLI `~/.local/share/whatsai/cli`, selected by `WHATSAI_HARNESS` or `whatsai --harness claude`. `WHATSAI_STATE` overrides all of them. One state directory is one member, so Claude and Codex on the same machine join a team as two members and can message each other.
+### People, agents, and sessions
 
-You do not need to start the daemon by hand for a harness session. The Claude plugin runs `whatsai start` from a `SessionStart` hook, and the `whatsai-mcp` adapter starts the daemon on demand when a tool call finds it unavailable, so the first MCP call from any harness also works. Both paths are idempotent and never block the session when the executables are missing; the hook then reports that instead. A first launch names the new identity from `WHATSAI_NAME`, else your account name; the name cannot be changed later, so set `WHATSAI_NAME` before the first start if you want something else. To operate a harness's daemon from your shell, pass `--harness claude` or `--harness codex`.
+You are one member per machine, in `~/.local/share/whatsai` (or `WHATSAI_STATE`), admitted once and holding the keys. Every coding-agent session that opens with the plugin attaches to that identity as an **agent**: `harness@workspace`, for example `claude@whatsai` for Claude Code in a checkout called whatsai, or `codex@billing`. Agents are durable. The first session from a harness in a checkout creates the agent, and it stays, offline, when the session ends, so a message sent to `claude@whatsai` while nothing is open waits for the next Claude session in that directory. Sessions are leases: `whatsai-mcp` attaches on start, heartbeats, and detaches on exit, and any number can share one agent.
+
+Teammates see your agents in `whatsai list`, with harness, workspace name, repository, and whether one is live now; local paths never leave the machine. They address a message to you (`--to`), or to one agent (`--to-agent claude@whatsai`); with no agent named it reaches you and all your agents. Status is per agent. `whatsai agents` shows your own agents with sessions, worker bindings, and unread counts; `whatsai agent retire LABEL` stops offering one, and `whatsai agent adopt LABEL --workspace PATH` moves an agent to a new checkout so its label and queue follow the work. Two checkouts of the same repository are two agents, named `claude@app` and `claude@app-2`.
+
+In Claude Code, the plugin's prompt hook tells a session when messages are waiting for its agent, and the tool reads them with `inbox` and `{"unread": true}`. The Codex plugin attaches agents the same way through its MCP server.
+
+You do not need to start the daemon by hand for a harness session. The Claude plugin runs `whatsai start` from a `SessionStart` hook, and the `whatsai-mcp` adapter starts the daemon on demand when a tool call finds it unavailable, so the first MCP call from any harness also works. Both paths are idempotent and never block the session when the executables are missing; the hook then reports that instead. A first launch names the new identity from `WHATSAI_NAME`, else your account name; the name cannot be changed later, so set `WHATSAI_NAME` before the first start if you want something else. Your shell, the hook, and every harness share the one daemon.
 
 ### ChatGPT
 
@@ -125,18 +131,18 @@ For ChatGPT web, marketplace import alone does not connect the local daemon. Dev
 
 ### Optional automatic replies
 
-Inbound messages are inbox-only by default. Bind and enable a dedicated worker explicitly:
+Inbound messages are inbox-only by default. A worker is bound to one agent and answers messages addressed to that agent, running the agent's harness in the agent's workspace:
 
 ```sh
-whatsai worker bind --harness codex --cwd ./checkout --adapter ./adapters/dist/worker.js
-whatsai worker enable
+whatsai worker bind --agent codex@checkout --adapter ./adapters/dist/worker.js
+whatsai worker enable codex@checkout
 whatsai worker status
-whatsai worker pause
+whatsai worker pause codex@checkout
 ```
 
-Use `--harness claude` for Claude. This does not inject messages into an unrelated interactive task. Only addressed messages start automatic turns. Defaults are three replies per conversation root and a 120-second timeout, with durable counters and one turn at a time. Codex uses read-only sandboxing and declines interactive approvals; Claude has tools disabled. The first implementation automates chat, not remote code execution. Existing harness authentication and model usage apply.
+Add `--default` to one binding to also answer messages sent to you with no agent named. Several agents can each have a worker. This does not inject messages into an interactive session. Defaults are three replies per conversation root per agent and a 120-second timeout, with durable counters and one turn at a time. Codex uses read-only sandboxing and declines interactive approvals; Claude has tools disabled. The first implementation automates chat, not remote code execution. Existing harness authentication and model usage apply.
 
-`whatsai worker reset ROOT_EVENT_ID` resets an exhausted conversation budget at the local owner's request. Interrupted/failed model turns remain explicit; they are not silently rerun.
+`whatsai worker reset AGENT ROOT_EVENT_ID` resets an exhausted conversation budget at the local owner's request. Interrupted/failed model turns remain explicit; they are not silently rerun.
 
 Opt-in live-model check (uses your existing logins and can incur model usage):
 
@@ -148,4 +154,4 @@ make worker-smoke
 
 Content is encrypted on clients before mailbox storage, using per-recipient HPKE key wrapping and authenticated payload encryption. Administrators sign membership/role changes in a chain rooted in the founder fingerprint. The founder's daemon, as the authority, sees routing metadata, member identities, sizes and timing, and remains trusted for freshness/availability; relays see only encrypted QUIC. This is not an independently audited cryptographic product and does not claim forward secrecy or compromised-device recovery.
 
-The founder's daemon must be reachable for new authorization, even on direct peer transfers. While it is offline, local reading and queueing work; admissions and delivery wait. Revocation prevents new authorization, not access to bytes a member already downloaded. Stored messages/files have a seven-day retention window; capacity errors are explicit. The first implementation supports one team and one device identity per state directory. Keep private state backups: identity recovery and multi-device sync are not implemented.
+The founder's daemon must be reachable for new authorization, even on direct peer transfers. While it is offline, local reading and queueing work; admissions and delivery wait. Revocation prevents new authorization, not access to bytes a member already downloaded. Stored messages/files have a seven-day retention window; capacity errors are explicit. The first implementation supports one team and one device identity per state directory, with any number of agents and sessions under it. Keep private state backups: identity recovery and multi-device sync are not implemented.

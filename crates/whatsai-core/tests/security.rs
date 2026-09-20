@@ -149,7 +149,7 @@ fn promoted_admin_can_admit_without_creator_and_last_admin_is_protected() {
 fn state_is_stable_and_future_schema_is_refused() {
     let tmp = TempDir::new().unwrap();
     let a = storage::identity(tmp.path(), "Alice").unwrap();
-    let db = storage::database(&tmp.path().join("client.db"), storage::CLIENT_SCHEMA).unwrap();
+    let db = storage::database(&tmp.path().join("client.db"), storage::CLIENT_MIGRATIONS).unwrap();
     assert_eq!(
         a.member().unwrap().id,
         storage::identity(tmp.path(), "Ignored")
@@ -160,7 +160,7 @@ fn state_is_stable_and_future_schema_is_refused() {
     );
     db.pragma_update(None, "user_version", 99).unwrap();
     drop(db);
-    assert!(storage::database(&tmp.path().join("client.db"), storage::CLIENT_SCHEMA).is_err());
+    assert!(storage::database(&tmp.path().join("client.db"), storage::CLIENT_MIGRATIONS).is_err());
     std::fs::remove_file(tmp.path().join("identity.json")).unwrap();
     assert!(storage::identity(tmp.path(), "Replacement").is_err());
 }
@@ -353,6 +353,8 @@ fn message_and_file_boundaries() {
         reply_to: None,
         root: id(),
         data: Value::Null,
+        agent: None,
+        to_agent: None,
     };
     e.validate().unwrap();
     e.text.push('x');
@@ -377,7 +379,7 @@ fn message_and_file_boundaries() {
 }
 #[test]
 fn worker_budget_survives_restart_and_inbox_default_does_not_launch() {
-    use whatsai_core::{client::Client, worker::Binding};
+    use whatsai_core::client::Client;
     let tmp = TempDir::new().unwrap();
     let mut c = Client::open(tmp.path(), "Receiver").unwrap();
     let a = Identity::generate("Sender");
@@ -393,16 +395,15 @@ fn worker_budget_survives_restart_and_inbox_default_does_not_launch() {
     ));
     let t = replay(&log, &a.member().unwrap().id).unwrap();
     c.set("team", &serde_json::to_string(&t).unwrap()).unwrap();
-    let b = Binding {
-        harness: "codex".into(),
-        cwd: tmp.path().to_str().unwrap().into(),
-        adapter: "/unused".into(),
-        enabled: false,
-        limit: 3,
-        timeout_secs: 120,
-        session: None,
-    };
-    c.set("worker", &serde_json::to_string(&b).unwrap())
+    let workspace = tmp.path().join("repo");
+    std::fs::create_dir(&workspace).unwrap();
+    let label = c.attach("codex", &workspace, None, None, None).unwrap()["agent"]["label"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let adapter = tmp.path().join("adapter.js");
+    std::fs::write(&adapter, "").unwrap();
+    c.worker_command(&json!({"operation":"bind","agent":label,"adapter":adapter,"default":true}))
         .unwrap();
     let root = id();
     for i in 0..4 {
@@ -414,6 +415,8 @@ fn worker_budget_survives_restart_and_inbox_default_does_not_launch() {
             reply_to: None,
             root: root.clone(),
             data: Value::Null,
+            agent: None,
+            to_agent: None,
         };
         let h = Header {
             version: VERSION,
@@ -434,9 +437,11 @@ fn worker_budget_survives_restart_and_inbox_default_does_not_launch() {
         c.receive(i, &env).unwrap();
     }
     assert!(c.claim_work().unwrap().is_none());
-    c.worker_command(&json!({"operation":"enable"})).unwrap();
+    c.worker_command(&json!({"operation":"enable","agent":label}))
+        .unwrap();
     for i in 0..3 {
         let work = c.claim_work().unwrap().unwrap();
+        assert_eq!(work.agent, label);
         if i == 0 {
             c.finish_work(&work, Ok(json!({"text":"x".repeat(MAX_TEXT+1)})))
                 .unwrap();
@@ -592,6 +597,8 @@ async fn hung_worker_is_timed_out() {
     let work = Work {
         event: id(),
         sender: "synthetic".into(),
+        sender_agent: None,
+        agent: "codex@test".into(),
         prompt: "test".into(),
         binding: Binding {
             harness: "codex".into(),
@@ -601,6 +608,7 @@ async fn hung_worker_is_timed_out() {
             limit: 3,
             timeout_secs: 0,
             session: None,
+            default: false,
         },
     };
     assert!(

@@ -109,7 +109,7 @@ async fn run_local(state: &Path, name: &str) -> Result<()> {
         let mut timer = tokio::time::interval(Duration::from_secs(2));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::select! {_=sync_stop.changed()=>break,_=timer.tick()=>{let mut c=sync_client.lock().await;let result=c.sync().await;let _=c.set("last_sync_error",&result.err().map(|e|e.to_string()).unwrap_or_default());
+            tokio::select! {_=sync_stop.changed()=>break,_=timer.tick()=>{let mut c=sync_client.lock().await;let _=c.expire_sessions();let result=c.sync().await;let _=c.set("last_sync_error",&result.err().map(|e|e.to_string()).unwrap_or_default());
             let _=c.set("endpoint",&serde_json::to_string(&sync_endpoint.addr()).unwrap_or_default());
             let batch=direct_batch(&c).unwrap_or_default();drop(c);
             for(eid,recipient,address,envelope)in batch {
