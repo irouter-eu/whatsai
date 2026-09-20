@@ -5,7 +5,7 @@ Call the `whatsai` tool with `action` and an `args` object. The adapter supplies
 | Action | Arguments |
 |---|---|
 | create | optional repository: credential-free HTTPS or SSH Git remote; the adapter supplies workspace from the session directory. The local daemon becomes the team's authority; returns the join key |
-| join | key: complete whatsai1 join key received from a member; the adapter supplies workspace |
+| join | key: complete whatsai1 join key received from a member; the adapter supplies workspace. A key for a team this identity already belongs to enrolls the workspace instead |
 | teams | no arguments; the teams this identity is in, joining, or creating |
 | approve, reject, promote, demote, revoke | member: exact public key fingerprint selected by the user |
 | agent-send | text, optional to: member fingerprint, optional to_agent: one of that member's published agent labels, optional reply_to: inbox event ID |

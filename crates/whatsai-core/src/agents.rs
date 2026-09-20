@@ -271,6 +271,27 @@ impl Client {
         }
         Ok(n)
     }
+    /// Enroll every agent attached from exactly this directory into `team`, regardless of what
+    /// the directory would match on its own. Used when the owner deliberately brings a
+    /// workspace into a team.
+    pub fn enroll_path(&self, team: &str, workspace: &Path) -> Result<Vec<String>> {
+        let canonical = std::fs::canonicalize(workspace)
+            .context("workspace does not exist")?
+            .to_string_lossy()
+            .into_owned();
+        let labels: Vec<String> = self
+            .db
+            .prepare("SELECT label FROM agents WHERE retired=0 AND workspace=? ORDER BY label")?
+            .query_map([&canonical], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for label in &labels {
+            self.db.execute(
+                "UPDATE agents SET enrolled=1,team=? WHERE label=?",
+                params![team, label],
+            )?;
+        }
+        Ok(labels)
+    }
     /// The team a session acting through `label` may touch, if any.
     pub fn is_enrolled(&self, label: &str) -> Result<Option<String>> {
         Ok(self

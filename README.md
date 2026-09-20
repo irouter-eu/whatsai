@@ -57,7 +57,7 @@ whatsai approve BOB_FINGERPRINT
 whatsai promote BOB_FINGERPRINT
 ```
 
-One identity, many teams: `whatsai teams` lists them, every command applies to the team the current directory is bound to, and `--team WORKSPACE` picks one from anywhere else. Holding the key is not membership. Requests expire after 24 hours. Admins can `reject`, `demote`, and `revoke`; the last admin cannot leave remaining members without an administrator. Members can `leave`. No election or voting machinery is included.
+One identity, many teams: `whatsai teams` lists them, every command applies to the team the current directory is bound to, and `--team WORKSPACE` picks one from anywhere else. Codex and Claude on one machine are the same identity, so a team one of them founds already belongs to the other; joining with that team's own key from another directory enrolls that directory rather than asking for admission. Holding the key is not membership. Requests expire after 24 hours. Admins can `reject`, `demote`, and `revoke`; the last admin cannot leave remaining members without an administrator. Members can `leave`. No election or voting machinery is included.
 
 The founder's daemon is the team's authority in this first implementation: it approves admissions, records membership changes, and holds the encrypted mailbox for members who are offline. While it is offline, new admissions and mailbox delivery wait, and members who are online keep talking to each other directly. Mirroring the authority to every admin's daemon is the next step. Daemons use iroh's public relays by default so teams work across NATs with nothing to host; see [hosting and operations](docs/operations.md) for self-hosted relays and LAN-only setups.
 

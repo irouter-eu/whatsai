@@ -134,6 +134,11 @@ def main():
    assert attached['enrolled'] and attached['team_name']=='bob-notes','the joined directory enrolls by exact path'
    stray=rpc('charlie',{'action':'agent','operation':'attach','harness':'claude','workspace':str(base/'charlie')})['agent']
    assert not stray['enrolled']
+   other=base/'bob-other';other.mkdir()
+   rpc('bob',{'action':'agent','operation':'attach','harness':'claude','workspace':str(other)})
+   own=cli('bob','join',key2['join'],'--workspace',str(other))
+   assert own['state']=='enrolled' and own['agents']==['claude@bob-other'],own
+   assert rpc('bob',{'action':'agent','operation':'show','agent':'claude@bob-other'})['team_name']=='bob-notes'
    print('PASS a second, path-bound team without Git: directory-scoped enrolment, --team selection, messages stay put',flush=True)
   finally:
    for p,log in processes:

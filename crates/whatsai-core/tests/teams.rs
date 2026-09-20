@@ -233,3 +233,44 @@ fn a_single_team_database_upgrades_into_the_first_team_row() {
     assert!(c.config("team").unwrap().is_none());
     assert_eq!(c.find_team("repo").unwrap(), team.id);
 }
+
+#[tokio::test]
+async fn joining_with_a_key_you_already_hold_enrolls_that_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let mut c = founder(&tmp);
+    let copyk8 = tmp.path().join("copyk8");
+    std::fs::create_dir(&copyk8).unwrap();
+    let key = c.create(None, &copyk8).await.unwrap();
+    let mailbox = tmp.path().join("mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let session = c.attach("claude", &mailbox, None, None, None).unwrap()["agent"].clone();
+    assert_eq!(
+        session["enrolled"], false,
+        "another directory is not in the team by itself"
+    );
+    let result = c
+        .command(
+            json!({"action":"join","key":key["join"],"workspace":mailbox,"via":session["label"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "enrolled");
+    assert_eq!(result["workspace"], "copyk8");
+    assert_eq!(result["agents"], json!([session["label"]]));
+    let after = c.agent(session["label"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        (after["enrolled"].as_bool(), after["team_name"].as_str()),
+        (Some(true), Some("copyk8"))
+    );
+    assert_eq!(
+        c.teams().unwrap().as_array().unwrap().len(),
+        1,
+        "no second membership was created"
+    );
+    assert!(
+        c.command(json!({"action":"list","via":session["label"]}))
+            .await
+            .is_ok(),
+        "the session can now act in the team"
+    );
+}

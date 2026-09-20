@@ -449,10 +449,18 @@ impl Client {
                 .unwrap_or(false),
             "invalid founder fingerprint"
         );
-        ensure!(
-            self.membership(&card.team).is_err(),
-            "already a member of that team"
-        );
+        // The same identity holding the key, from another checkout: that is an enrolment of this
+        // workspace into a team it already belongs to, not an admission.
+        if let Ok(m) = self.membership(&card.team) {
+            let enrolled = self.enroll_path(&m.id, workspace)?;
+            return Ok(json!({
+                "state":"enrolled",
+                "team":m.id,
+                "workspace":m.team.workspace,
+                "agents":enrolled,
+                "notice":"This identity already belongs to that team; the workspace's agents are now enrolled in it. Publish an agent to make it visible to teammates."
+            }));
+        }
         let authority: EndpointAddr = serde_json::from_value(card.authority.clone())?;
         let path = std::fs::canonicalize(workspace)
             .ok()
@@ -1180,14 +1188,24 @@ impl Client {
                     .as_str()
                     .or(cmd["cwd"].as_str())
                     .context("missing workspace")?;
-                self.join(
-                    cmd["key"]
-                        .as_str()
-                        .or(cmd["descriptor"].as_str())
-                        .context("missing key")?,
-                    Path::new(workspace),
-                )
-                .await
+                let result = self
+                    .join(
+                        cmd["key"]
+                            .as_str()
+                            .or(cmd["descriptor"].as_str())
+                            .context("missing key")?,
+                        Path::new(workspace),
+                    )
+                    .await?;
+                // The session that brought the key in is part of the team it named.
+                if let Some(via) = cmd["via"].as_str()
+                    && valid_label(via).is_ok()
+                    && matches!(result["state"].as_str(), Some("enrolled" | "admitted"))
+                    && let Some(team) = result["team"].as_str()
+                {
+                    let _ = self.enroll(via, true, Some(team));
+                }
+                Ok(result)
             }
             "join-status" => self.join_status().await,
             "list" => Ok(json!(self.refresh(&team(&cmd)?).await?)),
