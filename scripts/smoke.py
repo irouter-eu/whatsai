@@ -84,7 +84,8 @@ def main():
    cli('bob','agent','publish',claude_label);cli('bob','agent','publish','codex@app');cli('bob','sync');cli('charlie','sync')
    published=cli('charlie','list')['agents'][bob];assert {a['label'] for a in published}=={'claude@app','codex@app'} and all('workspace' in a and '/' not in a['workspace'] for a in published)
    assert cli('charlie','send','wrong label','--to',bob,'--to-agent','claude@nowhere',check=False).returncode!=0
-   cli('charlie','send','for claude only','--to',bob,'--to-agent',claude_label);cli('charlie','send','for everyone');cli('charlie','sync');cli('bob','sync')
+   cli('charlie','send','for claude only','--to',claude_label);cli('charlie','send','for everyone');cli('charlie','send','by name','--to','bob');assert cli('charlie','send','nobody','--to','zed',check=False).returncode!=0;cli('charlie','sync');cli('bob','sync')
+   named=[x for x in cli('bob','inbox') if x['event']['text']=='by name'];assert named and named[0]['event']['to']==bob and named[0]['event'].get('to_agent') is None,'a name resolves to the member'
    claude_unread=cli('bob','agent','unread','--agent',claude_label);codex_unread=cli('bob','agent','unread','--agent','codex@app')
    assert (claude_unread['addressed'],codex_unread['addressed'])==(1,0),(claude_unread,codex_unread)
    assert claude_unread['shared']>=1

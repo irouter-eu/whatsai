@@ -4,9 +4,12 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(version, about = "Private teamwork for people and their coding agents")]
 struct Args {
-    /// State directory; defaults to ~/.local/share/whatsai, one identity per person per machine.
+    /// State directory; defaults to ~/.local/share/whatsai, or the profile's directory.
     #[arg(long, env = "WHATSAI_STATE", global = true)]
     state: Option<PathBuf>,
+    /// Which person you are on a shared OS account: selects ~/.local/share/whatsai/profiles/NAME.
+    #[arg(long, env = "WHATSAI_PROFILE", global = true)]
+    profile: Option<String>,
     /// Which team a command means: id, workspace name, or repository. Defaults to the team the
     /// current directory is bound to, or the only team you have.
     #[arg(long, global = true)]
@@ -25,6 +28,8 @@ enum Command {
     Health,
     /// Teams you belong to, are joining, or are still creating.
     Teams,
+    /// Profiles with an identity on this machine (people sharing this OS account).
+    Profiles,
     Stop,
     Sync,
     Invite,
@@ -95,7 +100,8 @@ enum Command {
     Leave,
     Send {
         text: String,
-        /// Recipient member fingerprint.
+        /// Recipient: a member's name or fingerprint, one of their published agents by label
+        /// (claude@repo), or NAME/LABEL when a label is not unique in the team.
         #[arg(long)]
         to: Option<String>,
         /// One of the recipient's agents, e.g. claude@repo; needs --to.
@@ -268,9 +274,10 @@ fn default_name() -> String {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let state = args
-        .state
-        .unwrap_or_else(whatsai_core::storage::default_state);
+    let state = match args.state {
+        Some(state) => state,
+        None => whatsai_core::storage::default_state_for(args.profile.as_deref())?,
+    };
     let command = match args.command {
         Command::Start { name } => {
             if let Ok(result) =
@@ -417,6 +424,13 @@ async fn main() -> anyhow::Result<()> {
                 json!({"action":"worker","operation":"reset","agent":agent,"root":root})
             }
         },
+        Command::Profiles => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&whatsai_core::storage::profiles())?
+            );
+            return Ok(());
+        }
         Command::Teams => json!({"action":"teams"}),
         Command::Register => json!({"action":"register"}),
         Command::Health => json!({"action":"health"}),

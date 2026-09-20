@@ -21,6 +21,39 @@ use std::{
 
 /// id, state, envelope, error, team.
 type OutboxRow = (String, String, String, Option<String>, Option<String>);
+
+/// Turn a human address into a member fingerprint and, when it names an agent, its label.
+/// Accepts `NAME`, `LABEL`, or `NAME/LABEL`; names and labels must be unique in the team.
+pub fn resolve_address(team: &Team, address: &str) -> Result<(String, Option<String>)> {
+    let (name, label) = match address.split_once('/') {
+        Some((n, l)) => (Some(n.trim()), Some(l.trim())),
+        None if address.contains('@') => (None, Some(address.trim())),
+        None => (Some(address.trim()), None),
+    };
+    let mut candidates: Vec<&Member> = team.members.values().collect();
+    if let Some(name) = name {
+        candidates.retain(|m| m.name == name || m.id == name);
+        ensure!(!candidates.is_empty(), "no member named {name:?}");
+    }
+    if let Some(label) = label {
+        valid_label(label)?;
+        candidates.retain(|m| {
+            team.agents
+                .get(&m.id)
+                .and_then(|a| a.as_array())
+                .is_some_and(|a| a.iter().any(|x| x["label"] == label))
+        });
+        ensure!(
+            !candidates.is_empty(),
+            "no member has published an agent {label:?}; list shows what is published"
+        );
+    }
+    ensure!(
+        candidates.len() == 1,
+        "{address:?} matches several members; qualify it as NAME/LABEL or use a fingerprint"
+    );
+    Ok((candidates[0].id.clone(), label.map(str::to_owned)))
+}
 pub struct Client {
     pub dir: PathBuf,
     pub identity: Identity,
@@ -595,9 +628,14 @@ impl Client {
         let t = self.team(team)?;
         let me = self.identity.member()?.id;
         ensure!(t.members.contains_key(&me), "not a current member");
-        if let Some(target) = &to {
-            ensure!(t.members.contains_key(target), "unknown recipient");
-        }
+        // `to` may be a fingerprint, a display name, an agent label, or `name/label`.
+        let (to, to_agent) = match to {
+            Some(target) if !t.members.contains_key(&target) => {
+                let (member, label) = resolve_address(&t, &target)?;
+                (Some(member), to_agent.or(label))
+            }
+            other => (other, to_agent),
+        };
         if let Some(label) = &agent {
             let info = self
                 .agent(label)

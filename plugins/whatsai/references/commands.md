@@ -8,7 +8,7 @@ Call the `whatsai` tool with `action` and an `args` object. The adapter supplies
 | join | key: complete whatsai1 join key received from a member; the adapter supplies workspace. A key for a team this identity already belongs to enrolls the workspace instead |
 | teams | no arguments; the teams this identity is in, joining, or creating |
 | approve, reject, promote, demote, revoke | member: exact public key fingerprint selected by the user |
-| agent-send | text, optional to: member fingerprint, optional to_agent: one of that member's published agent labels, optional reply_to: inbox event ID |
+| agent-send | text, optional to: member name or fingerprint, a published agent label (claude@repo), or NAME/LABEL; optional to_agent alongside a member to; optional reply_to: inbox event ID |
 | inbox | optional unread: true for only what this agent has not marked read; optional agent to read as another local agent |
 | unread, mark-read | no arguments; counts or clears unread for this session's agent |
 | publish, unpublish | no arguments for this session's agent, or agent: another local label; only on the user's request |

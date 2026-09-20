@@ -309,3 +309,86 @@ async fn the_founding_session_is_visible_in_its_team() {
     assert_eq!(visible[0]["label"], codex["label"]);
     assert_eq!(visible[0]["workspace"], "copyk8");
 }
+
+#[test]
+fn people_and_agents_are_addressable_by_name() {
+    use whatsai_core::{client::resolve_address, crypto::Identity, protocol::*};
+    let alice = Identity::generate("alice").member().unwrap();
+    let bob = Identity::generate("bob").member().unwrap();
+    let bob2 = Identity::generate("bob").member().unwrap();
+    let mut team = whatsai_core::governance::replay(
+        &[Identity::generate("x")
+            .sign(Governance {
+                team: id(),
+                revision: 0,
+                previous: String::new(),
+                action: "create".into(),
+                member: None,
+                target: None,
+                repository: None,
+                workspace: Some("t".into()),
+            })
+            .unwrap()],
+        "",
+    )
+    .err()
+    .map(|_| Team {
+        id: id(),
+        founder: alice.id.clone(),
+        repository: None,
+        workspace: "t".into(),
+        revision: 0,
+        members: [
+            (alice.id.clone(), alice.clone()),
+            (bob.id.clone(), bob.clone()),
+            (bob2.id.clone(), bob2.clone()),
+        ]
+        .into(),
+        admins: vec![alice.id.clone()],
+        history: vec![],
+        presence: Default::default(),
+        endpoints: Default::default(),
+        agents: Default::default(),
+    })
+    .unwrap();
+    team.agents.insert(
+        alice.id.clone(),
+        json!([{"label":"claude@copyk8"},{"label":"codex@copyk8"}]),
+    );
+    team.agents
+        .insert(bob.id.clone(), json!([{"label":"claude@copyk8"}]));
+    assert_eq!(
+        resolve_address(&team, "alice").unwrap(),
+        (alice.id.clone(), None)
+    );
+    assert_eq!(
+        resolve_address(&team, &alice.id).unwrap(),
+        (alice.id.clone(), None)
+    );
+    assert_eq!(
+        resolve_address(&team, "codex@copyk8").unwrap(),
+        (alice.id.clone(), Some("codex@copyk8".into()))
+    );
+    assert_eq!(
+        resolve_address(&team, "alice/claude@copyk8").unwrap(),
+        (alice.id.clone(), Some("claude@copyk8".into()))
+    );
+    let err = resolve_address(&team, "claude@copyk8")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("several members"),
+        "two members publish that label: {err}"
+    );
+    let err = resolve_address(&team, "bob").unwrap_err().to_string();
+    assert!(
+        err.contains("several members"),
+        "two members are called bob: {err}"
+    );
+    assert_eq!(
+        resolve_address(&team, &format!("{}/claude@copyk8", bob.id)).unwrap(),
+        (bob.id.clone(), Some("claude@copyk8".into()))
+    );
+    assert!(resolve_address(&team, "carol").is_err());
+    assert!(resolve_address(&team, "alice/nothing@here").is_err());
+}

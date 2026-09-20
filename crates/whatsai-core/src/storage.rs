@@ -98,12 +98,49 @@ pub fn database(path: &Path, migrations: &[&str]) -> Result<Connection> {
     }
     Ok(c)
 }
-/// One member per person per machine: `WHATSAI_STATE` or `~/.local/share/whatsai`. Agents and
-/// sessions live inside that one identity rather than getting directories of their own.
+/// One member per person. `WHATSAI_STATE` names the directory outright; otherwise a profile
+/// (`WHATSAI_PROFILE`, or `--profile`) selects `~/.local/share/whatsai/profiles/<name>`, so
+/// several people sharing one OS account each keep their own identity, daemon and teams; with
+/// neither, a personal machine uses `~/.local/share/whatsai`.
 pub fn default_state() -> PathBuf {
-    std::env::var_os("WHATSAI_STATE")
-        .map(PathBuf::from)
-        .unwrap_or_else(base_state)
+    let profile = std::env::var("WHATSAI_PROFILE").ok();
+    default_state_for(profile.as_deref()).unwrap_or_else(|_| base_state())
+}
+pub fn default_state_for(profile: Option<&str>) -> Result<PathBuf> {
+    if let Some(explicit) = std::env::var_os("WHATSAI_STATE") {
+        return Ok(PathBuf::from(explicit));
+    }
+    match profile.map(str::trim).filter(|p| !p.is_empty()) {
+        None => Ok(base_state()),
+        Some(name) => {
+            valid_profile(name)?;
+            Ok(base_state().join("profiles").join(name))
+        }
+    }
+}
+pub fn valid_profile(name: &str) -> Result<()> {
+    ensure!(
+        name.len() <= 32
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')),
+        "invalid profile name {name:?}: use letters, digits, '-' or '_'"
+    );
+    Ok(())
+}
+/// Profiles that exist on this machine, for the owner to see who has state here.
+pub fn profiles() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(base_state().join("profiles"))
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().join("identity.json").exists())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 pub fn base_state() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()))
