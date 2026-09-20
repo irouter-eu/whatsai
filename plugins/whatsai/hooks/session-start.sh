@@ -7,7 +7,7 @@ if ! command -v whatsai >/dev/null 2>&1; then
 fi
 if output=$(whatsai start 2>&1); then
   name=$(basename "$PWD")
-  echo "WhatsAI daemon ready. In this checkout you are the agent claude@${name}, private until the user asks to publish it (whatsai tool action publish, or \`whatsai agent publish claude@${name}\`); once published, teammates can see and address it."
+  echo "WhatsAI daemon ready. In this checkout you are the agent claude@${name}. It takes part in the team only if enrolled (automatic for a checkout of the team's own repository, otherwise the user runs \`whatsai agent enroll claude@${name}\`), and it stays private to the team until the user asks to publish it."
 else
   echo "WhatsAI daemon could not start: $(printf '%s' "$output" | tail -n 1)"
 fi

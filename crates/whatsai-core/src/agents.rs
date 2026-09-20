@@ -5,9 +5,11 @@
 //! and kept until retired so messages sent while nobody is there wait for the next session.
 //! A session is one running harness process holding a lease on an agent.
 //!
-//! Attaching is local bookkeeping. The team only learns about an agent once it is published,
-//! either explicitly or, when the owner opts in, automatically for checkouts of the team's own
-//! repository.
+//! Attaching is local bookkeeping. An agent takes part in the team only once it is enrolled:
+//! automatically when its checkout's origin is the team's repository (unless auto-enroll is
+//! off), otherwise on the owner's say-so. Sessions of unenrolled agents cannot read, send, or
+//! see the join key. Publishing, which lets the team see and address the agent, is a further
+//! explicit step, with one opt-in for checkouts of the team's own repository.
 use crate::{client::Client, protocol::*, service::field};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
@@ -57,13 +59,21 @@ impl Client {
                 label
             }
         };
-        // Opt-in only: a checkout of the team's own repository may be published on attach.
-        if self.config("auto_publish")?.as_deref() == Some("team-repo")
-            && let (Some(repo), Ok(team)) = (&repository, self.team())
+        // A checkout of the team's own repository is part of the team unless the owner says
+        // otherwise; publishing it too is a separate opt-in.
+        if let (Some(repo), Ok(team)) = (&repository, self.team())
             && *repo == team.repository
         {
-            self.db
-                .execute("UPDATE agents SET published=1 WHERE label=?", [&label])?;
+            if self.config("auto_enroll")?.as_deref() != Some("off") {
+                self.db
+                    .execute("UPDATE agents SET enrolled=1 WHERE label=?", [&label])?;
+            }
+            if self.config("auto_publish")?.as_deref() == Some("team-repo") {
+                self.db.execute(
+                    "UPDATE agents SET published=1,enrolled=1 WHERE label=?",
+                    [&label],
+                )?;
+            }
         }
         let lease = id();
         self.db.execute(
@@ -116,7 +126,7 @@ impl Client {
         let row = self
             .db
             .query_row(
-                "SELECT harness,workspace,repository,created,last_seen,retired,worker,cursor,(SELECT count(*) FROM sessions WHERE agent=label),published FROM agents WHERE label=?",
+                "SELECT harness,workspace,repository,created,last_seen,retired,worker,cursor,(SELECT count(*) FROM sessions WHERE agent=label),published,enrolled FROM agents WHERE label=?",
                 [label],
                 |r| {
                     Ok(json!({
@@ -131,6 +141,7 @@ impl Client {
                         "cursor":r.get::<_,i64>(7)?,
                         "sessions":r.get::<_,i64>(8)?,
                         "published":r.get::<_,i64>(9)?==1,
+                        "enrolled":r.get::<_,i64>(10)?==1,
                     }))
                 },
             )
@@ -160,7 +171,7 @@ impl Client {
     pub fn agent_presence(&self) -> Result<Value> {
         self.expire_sessions()?;
         let mut q = self.db.prepare(
-            "SELECT label,harness,workspace,repository,last_seen,(SELECT count(*) FROM sessions WHERE agent=label) FROM agents WHERE retired=0 AND published=1 ORDER BY label",
+            "SELECT label,harness,workspace,repository,last_seen,(SELECT count(*) FROM sessions WHERE agent=label) FROM agents WHERE retired=0 AND published=1 AND enrolled=1 ORDER BY label",
         )?;
         let rows = q.query_map([], |r| {
             Ok(json!({
@@ -174,21 +185,58 @@ impl Client {
         })?;
         Ok(json!(rows.collect::<rusqlite::Result<Vec<_>>>()?))
     }
-    /// Publishing is the one act that lets the team see and address an agent.
+    /// Publishing is the one act that lets the team see and address an agent; it implies
+    /// taking part, so it enrolls too.
     pub fn publish(&self, label: &str, published: bool) -> Result<Value> {
         valid_label(label)?;
-        let n = self.db.execute(
-            "UPDATE agents SET published=? WHERE label=? AND retired=0",
-            params![published, label],
-        )?;
+        let n = if published {
+            self.db.execute(
+                "UPDATE agents SET published=1,enrolled=1 WHERE label=? AND retired=0",
+                [label],
+            )?
+        } else {
+            self.db.execute(
+                "UPDATE agents SET published=0 WHERE label=? AND retired=0",
+                [label],
+            )?
+        };
         ensure!(n == 1, "unknown or retired agent");
         self.agent(label)
+    }
+    /// Enrolment is what lets an agent's sessions take part in the team at all.
+    pub fn enroll(&self, label: &str, enrolled: bool) -> Result<Value> {
+        valid_label(label)?;
+        let n = if enrolled {
+            self.db.execute(
+                "UPDATE agents SET enrolled=1 WHERE label=? AND retired=0",
+                [label],
+            )?
+        } else {
+            self.db.execute(
+                "UPDATE agents SET enrolled=0,published=0 WHERE label=? AND retired=0",
+                [label],
+            )?
+        };
+        ensure!(n == 1, "unknown or retired agent");
+        self.agent(label)
+    }
+    /// Whether a session acting through `label` may touch the team at all.
+    pub fn is_enrolled(&self, label: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT enrolled FROM agents WHERE label=? AND retired=0",
+                [label],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some_and(|e| e == 1))
     }
     /// Retiring keeps history but stops the agent being offered or addressed by the team.
     pub fn retire(&self, label: &str) -> Result<Value> {
         valid_label(label)?;
         let n = self.db.execute(
-            "UPDATE agents SET retired=1,worker=NULL,published=0 WHERE label=?",
+            "UPDATE agents SET retired=1,worker=NULL,published=0,enrolled=0 WHERE label=?",
             [label],
         )?;
         ensure!(n == 1, "unknown agent");
@@ -230,13 +278,20 @@ impl Client {
     /// Unread counts for one agent: addressed to it explicitly, and shared (to the member or
     /// to everyone) that it has not marked read yet. Own messages never count.
     pub fn unread(&self, label: &str) -> Result<Value> {
-        let cursor: i64 = self
+        let (cursor, enrolled): (i64, i64) = self
             .db
-            .query_row("SELECT cursor FROM agents WHERE label=?", [label], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT cursor,enrolled FROM agents WHERE label=?",
+                [label],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()?
             .context("unknown agent")?;
+        if enrolled != 1 {
+            return Ok(
+                json!({"agent":label,"addressed":0,"shared":0,"cursor":cursor,"enrolled":false}),
+            );
+        }
         let me = self.identity.member()?.id;
         let count = |sql: &str| -> Result<i64> {
             Ok(self
@@ -249,7 +304,9 @@ impl Client {
         let shared = count(
             "SELECT count(*) FROM inbox WHERE seq>?1 AND json_extract(envelope,'$.signer')!=?2 AND json_extract(event,'$.to_agent') IS NULL AND (json_extract(event,'$.to') IS NULL OR json_extract(event,'$.to')=?2) AND ?3=?3",
         )?;
-        Ok(json!({"agent":label,"addressed":addressed,"shared":shared,"cursor":cursor}))
+        Ok(
+            json!({"agent":label,"addressed":addressed,"shared":shared,"cursor":cursor,"enrolled":true}),
+        )
     }
     pub fn mark_read(&self, label: &str) -> Result<Value> {
         let latest: i64 = self
@@ -312,6 +369,17 @@ impl Client {
             "detach" => self.detach(field(cmd, "lease")?),
             "publish" => self.publish(&self.label_from(cmd)?, true),
             "unpublish" => self.publish(&self.label_from(cmd)?, false),
+            "enroll" => self.enroll(&self.label_from(cmd)?, true),
+            "unenroll" => self.enroll(&self.label_from(cmd)?, false),
+            "auto-enroll" => {
+                let mode = field(cmd, "mode")?;
+                ensure!(
+                    ["off", "team-repo"].contains(&mode),
+                    "auto-enroll mode is off or team-repo"
+                );
+                self.set("auto_enroll", mode)?;
+                Ok(json!({"auto_enroll":mode}))
+            }
             "auto-publish" => {
                 let mode = field(cmd, "mode")?;
                 ensure!(

@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,writeFileSync,chmodSync,readFileSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {attachAgent,detectHarness,detectSession} from './agent.js';
+import {attachAgent,detectHarness,detectSession,stamp} from './agent.js';
+
+test('every session call is stamped with its agent, or marked unattached',()=>{
+ assert.deepEqual(stamp({action:'list'},{harness:'claude',workspace:'/x',label:'claude@x'}),{action:'list',via:'claude@x'});
+ assert.deepEqual(stamp({action:'list'},{harness:'claude',workspace:'/x'}),{action:'list',via:'unattached'});
+});
 
 test('harness detection prefers the explicit variable, then harness markers',()=>{
  assert.equal(detectHarness({WHATSAI_HARNESS:' Claude '}),'claude');

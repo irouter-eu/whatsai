@@ -215,6 +215,8 @@ fn unread_counts_follow_addressing_and_cursors() {
         .as_str()
         .unwrap()
         .to_owned();
+    c.enroll(&claude, true).unwrap();
+    c.enroll(&codex, true).unwrap();
     deliver(&mut c, &sender, &t, 1, Some(&claude), Some("claude@theirs"));
     deliver(&mut c, &sender, &t, 2, Some(&codex), None);
     deliver(&mut c, &sender, &t, 3, None, None);
@@ -281,6 +283,8 @@ fn workers_answer_only_their_agent_and_budgets_are_per_agent() {
         .as_str()
         .unwrap()
         .to_owned();
+    c.enroll(&claude, true).unwrap();
+    c.enroll(&codex, true).unwrap();
     c.worker_command(&json!({"operation":"bind","agent":claude,"adapter":adapter}))
         .unwrap();
     c.worker_command(&json!({"operation":"bind","agent":codex,"adapter":adapter,"limit":1}))
@@ -361,7 +365,7 @@ fn version_one_databases_upgrade_in_place() {
     let v: i64 =
         c.db.pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, 4);
     assert!(
         c.config("worker").unwrap().is_none(),
         "single-worker binding is retired"
@@ -428,5 +432,147 @@ fn publishing_is_explicit_unless_the_owner_opts_in_for_the_team_repository() {
         c.attach("claude", &ours, None, None, None).unwrap()["agent"]["published"],
         true,
         "re-attaching under the opt-in publishes the first agent too"
+    );
+}
+
+#[tokio::test]
+async fn sessions_touch_the_team_only_through_enrolled_agents() {
+    let tmp = TempDir::new().unwrap();
+    let mut c = Client::open(tmp.path(), "Person").unwrap();
+    let (sender, t) = team_with(&c);
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let label = c.attach("claude", &elsewhere, None, None, None).unwrap()["agent"]["label"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        c.agent(&label).unwrap()["enrolled"],
+        false,
+        "an unrelated checkout is not part of the team"
+    );
+    deliver(&mut c, &sender, &t, 1, None, None);
+    // Owner commands from the shell carry no `via` and always work.
+    assert_eq!(
+        c.command(json!({"action":"inbox"}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // A session of an unenrolled agent is refused every team action, sees no inbox and no unread.
+    for action in [
+        "list", "inbox", "invite", "send", "sync", "requests", "worker",
+    ] {
+        let err = c
+            .command(json!({"action":action,"via":label,"text":"x","operation":"status"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not enrolled"), "{action}: {err}");
+    }
+    assert!(
+        c.command(json!({"action":"health","via":label}))
+            .await
+            .is_ok(),
+        "local actions stay available"
+    );
+    assert_eq!(
+        c.inbox_for(Some(&label), false)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let unread = c.unread(&label).unwrap();
+    assert_eq!(
+        (unread["enrolled"].as_bool(), unread["shared"].as_i64()),
+        (Some(false), Some(0))
+    );
+    let err = c
+        .command(json!({"action":"inbox","via":"unattached"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("not enrolled"),
+        "an unattached session is refused too: {err}"
+    );
+    // Enrolling opens the team to that agent's sessions; unenrolling closes it and unpublishes.
+    c.enroll(&label, true).unwrap();
+    assert_eq!(
+        c.command(json!({"action":"inbox","via":label}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(c.unread(&label).unwrap()["shared"], 1);
+    c.publish(&label, true).unwrap();
+    assert_eq!(c.agent_presence().unwrap().as_array().unwrap().len(), 1);
+    let after = c.enroll(&label, false).unwrap();
+    assert_eq!(
+        (after["enrolled"].as_bool(), after["published"].as_bool()),
+        (Some(false), Some(false))
+    );
+    assert_eq!(c.agent_presence().unwrap().as_array().unwrap().len(), 0);
+    // Publishing an unenrolled agent enrolls it, since publishing means taking part.
+    let published = c.publish(&label, true).unwrap();
+    assert_eq!(
+        (
+            published["enrolled"].as_bool(),
+            published["published"].as_bool()
+        ),
+        (Some(true), Some(true))
+    );
+    // Checkouts of the team repository enroll themselves unless the owner turns that off.
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["remote", "add", "origin", t.repository.as_str()],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(&args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    assert_eq!(
+        c.attach("codex", &repo, None, None, None).unwrap()["agent"]["enrolled"],
+        true
+    );
+    c.agent_command(&json!({"operation":"auto-enroll","mode":"off"}))
+        .unwrap();
+    let again = tmp.path().join("repo2");
+    std::fs::create_dir(&again).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["remote", "add", "origin", t.repository.as_str()],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&again)
+                .args(&args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    assert_eq!(
+        c.attach("codex", &again, None, None, None).unwrap()["agent"]["enrolled"],
+        false
     );
 }

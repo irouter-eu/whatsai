@@ -166,6 +166,20 @@ enum AgentCommand {
     Unpublish {
         agent: String,
     },
+    /// Let this agent's sessions take part in the team (read, send, sync). Checkouts of the
+    /// team repository enroll themselves unless auto-enroll is off.
+    Enroll {
+        agent: String,
+    },
+    /// Cut this agent's sessions off from the team; unpublishes too.
+    Unenroll {
+        agent: String,
+    },
+    /// Whether checkouts of the team's own repository enroll themselves on attach.
+    AutoEnroll {
+        #[arg(value_parser = ["off", "team-repo"])]
+        mode: String,
+    },
     /// Whether checkouts of the team's own repository publish themselves on attach.
     AutoPublish {
         #[arg(value_parser = ["off", "team-repo"])]
@@ -332,6 +346,15 @@ async fn main() -> anyhow::Result<()> {
             }
             AgentCommand::Unpublish { agent } => {
                 json!({"action":"agent","operation":"unpublish","agent":agent})
+            }
+            AgentCommand::Enroll { agent } => {
+                json!({"action":"agent","operation":"enroll","agent":agent})
+            }
+            AgentCommand::Unenroll { agent } => {
+                json!({"action":"agent","operation":"unenroll","agent":agent})
+            }
+            AgentCommand::AutoEnroll { mode } => {
+                json!({"action":"agent","operation":"auto-enroll","mode":mode})
             }
             AgentCommand::AutoPublish { mode } => {
                 json!({"action":"agent","operation":"auto-publish","mode":mode})

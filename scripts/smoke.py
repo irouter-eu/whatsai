@@ -20,6 +20,8 @@ def main():
    r=subprocess.run([str(BIN/'whatsai'),'--state',str(base/who),'rpc'],input=json.dumps(op),capture_output=True,text=True,timeout=60)
    if r.returncode:raise AssertionError(r.stderr)
    return json.loads(r.stdout)
+  def rpc_ok(who,op):
+   return subprocess.run([str(BIN/'whatsai'),'--state',str(base/who),'rpc'],input=json.dumps(op),capture_output=True,text=True,timeout=60).returncode==0
   def await_ready(who):
    for _ in range(100):
     r=cli(who,'health',check=False)
@@ -74,6 +76,10 @@ def main():
    assert rpc('bob',{'action':'agent','operation':'attach','harness':'codex','workspace':str(ws)})['agent']['label']=='codex@app'
    cli('bob','sync');cli('charlie','sync')
    assert not cli('charlie','list')['agents'].get(bob),'attaching publishes nothing to the team'
+   # These checkouts are not the team repository, so their sessions are shut out until enrolled.
+   assert not rpc_ok('bob',{'action':'list','via':claude_label}) and not rpc_ok('bob',{'action':'invite','via':'unattached'}),'unenrolled sessions are refused team actions'
+   cli('bob','agent','enroll',claude_label);cli('bob','agent','enroll','codex@app')
+   assert rpc('bob',{'action':'list','via':claude_label})['id']==rpc('bob',{'action':'health'})['team']['id'],'enrolled sessions get through'
    cli('bob','agent','publish',claude_label);cli('bob','agent','publish','codex@app');cli('bob','sync');cli('charlie','sync')
    published=cli('charlie','list')['agents'][bob];assert {a['label'] for a in published}=={'claude@app','codex@app'} and all('workspace' in a and '/' not in a['workspace'] for a in published)
    assert cli('charlie','send','wrong label','--to',bob,'--to-agent','claude@nowhere',check=False).returncode!=0

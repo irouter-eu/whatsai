@@ -68,6 +68,10 @@ impl Client {
         valid_label(agent)?;
         let info = self.agent(agent)?;
         ensure!(info["retired"] != true, "agent is retired");
+        ensure!(
+            info["enrolled"] == true,
+            "agent {agent} is not enrolled in the team; enroll it before binding a worker"
+        );
         match op {
             "bind" => {
                 let harness = cmd["harness"]
@@ -133,7 +137,7 @@ impl Client {
         ensure!(team.members.contains_key(&me), "membership denied");
         let bound: Vec<(String, String)> = self
             .db
-            .prepare("SELECT label,worker FROM agents WHERE worker IS NOT NULL AND retired=0 ORDER BY label")?
+            .prepare("SELECT label,worker FROM agents WHERE worker IS NOT NULL AND retired=0 AND enrolled=1 ORDER BY label")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (agent, raw) in bound {

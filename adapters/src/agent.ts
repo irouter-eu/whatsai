@@ -1,6 +1,15 @@
 import {local} from './local.js';
 
-export interface Attached {label?:string;lease?:string;published?:boolean;harness:string;workspace:string;}
+export interface Attached {label?:string;lease?:string;published?:boolean;enrolled?:boolean;harness:string;workspace:string;}
+
+/**
+ * Every call a session makes carries `via`: its agent label, or "unattached" when the daemon
+ * never accepted an attach. The daemon refuses team actions unless that agent is enrolled, so
+ * a session in an unrelated checkout cannot read, send, or reveal the join key.
+ */
+export function stamp(command:Record<string,unknown>,session:Attached):Record<string,unknown> {
+ return {...command,via:session.label??'unattached'};
+}
 
 /** Which coding agent launched us: explicit env first, then the harness's own markers. */
 export function detectHarness(env:NodeJS.ProcessEnv=process.env):string {
@@ -28,7 +37,7 @@ export async function attachAgent(opts:{binary?:string;cwd?:string;heartbeatMs?:
   console.error(`whatsai-mcp: not attached as an agent (${e instanceof Error?e.message:String(e)})`);
   return attached;
  }
- attached.label=result?.agent?.label;attached.lease=result?.lease;attached.published=result?.agent?.published===true;
+ attached.label=result?.agent?.label;attached.lease=result?.lease;attached.published=result?.agent?.published===true;attached.enrolled=result?.agent?.enrolled===true;
  if(!attached.lease)return attached;
  const lease=attached.lease;
  const timer=setInterval(()=>{local({action:'agent',operation:'heartbeat',lease},opts.binary).catch(()=>{});},opts.heartbeatMs??15_000);

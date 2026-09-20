@@ -403,6 +403,14 @@ fn worker_budget_survives_restart_and_inbox_default_does_not_launch() {
         .to_owned();
     let adapter = tmp.path().join("adapter.js");
     std::fs::write(&adapter, "").unwrap();
+    assert!(
+        c.worker_command(
+            &json!({"operation":"bind","agent":label,"adapter":adapter,"default":true})
+        )
+        .is_err(),
+        "workers need an enrolled agent"
+    );
+    c.enroll(&label, true).unwrap();
     c.worker_command(&json!({"operation":"bind","agent":label,"adapter":adapter,"default":true}))
         .unwrap();
     let root = id();

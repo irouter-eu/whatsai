@@ -109,7 +109,12 @@ pub fn base_state() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()))
         .join(".local/share/whatsai")
 }
-pub const CLIENT_MIGRATIONS: &[&str] = &[CLIENT_SCHEMA_V1, CLIENT_SCHEMA_V2, CLIENT_SCHEMA_V3];
+pub const CLIENT_MIGRATIONS: &[&str] = &[
+    CLIENT_SCHEMA_V1,
+    CLIENT_SCHEMA_V2,
+    CLIENT_SCHEMA_V3,
+    CLIENT_SCHEMA_V4,
+];
 const CLIENT_SCHEMA_V1: &str = r#"
 CREATE TABLE config(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE outbox(id TEXT PRIMARY KEY,envelope TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'queued',error TEXT);
@@ -131,4 +136,8 @@ DELETE FROM config WHERE key='worker';
 /// Nothing about an agent leaves the machine until it is published on purpose.
 const CLIENT_SCHEMA_V3: &str = r#"
 ALTER TABLE agents ADD COLUMN published INTEGER NOT NULL DEFAULT 0;
+"#;
+/// Team access is per workspace: an agent takes part in the team only once enrolled.
+const CLIENT_SCHEMA_V4: &str = r#"
+ALTER TABLE agents ADD COLUMN enrolled INTEGER NOT NULL DEFAULT 0;
 "#;

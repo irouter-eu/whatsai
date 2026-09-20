@@ -504,13 +504,18 @@ impl Client {
         let (cursor, label) = match agent {
             Some(label) => {
                 valid_label(label)?;
-                let cursor: i64 = self
+                let (cursor, enrolled): (i64, i64) = self
                     .db
-                    .query_row("SELECT cursor FROM agents WHERE label=?", [label], |r| {
-                        r.get(0)
-                    })
+                    .query_row(
+                        "SELECT cursor,enrolled FROM agents WHERE label=?",
+                        [label],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
                     .optional()?
                     .context("unknown agent")?;
+                if enrolled != 1 {
+                    return Ok(json!([]));
+                }
                 (if unread_only { cursor } else { 0 }, Some(label.to_owned()))
             }
             None => (0, None),
@@ -766,8 +771,41 @@ impl Client {
         }
         Ok(json!(out))
     }
+    /// Actions a coding-agent session may only perform through an agent enrolled in the team.
+    /// Owner commands from the shell carry no `via` and are not gated.
+    const TEAM_ACTIONS: &[&str] = &[
+        "list",
+        "requests",
+        "approve",
+        "reject",
+        "promote",
+        "demote",
+        "revoke",
+        "leave",
+        "invite",
+        "inbox",
+        "outbox",
+        "sync",
+        "send",
+        "agent-send",
+        "files",
+        "share",
+        "download",
+        "status",
+        "handoff",
+        "accept-handoff",
+        "worker",
+    ];
     pub async fn command(&mut self, cmd: Value) -> Result<Value> {
         let action = field(&cmd, "action")?;
+        if Self::TEAM_ACTIONS.contains(&action)
+            && let Some(via) = cmd["via"].as_str()
+        {
+            ensure!(
+                valid_label(via).is_ok() && self.is_enrolled(via)?,
+                "this workspace's agent {via} is not enrolled in the team; the user can enroll it with `whatsai agent enroll {via}`"
+            );
+        }
         match action {
             "worker" => self.worker_command(&cmd),
             "agent" => self.agent_command(&cmd),
