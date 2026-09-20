@@ -1,6 +1,6 @@
 import {local} from './local.js';
 
-export interface Attached {label?:string;lease?:string;harness:string;workspace:string;}
+export interface Attached {label?:string;lease?:string;published?:boolean;harness:string;workspace:string;}
 
 /** Which coding agent launched us: explicit env first, then the harness's own markers. */
 export function detectHarness(env:NodeJS.ProcessEnv=process.env):string {
@@ -28,7 +28,7 @@ export async function attachAgent(opts:{binary?:string;cwd?:string;heartbeatMs?:
   console.error(`whatsai-mcp: not attached as an agent (${e instanceof Error?e.message:String(e)})`);
   return attached;
  }
- attached.label=result?.agent?.label;attached.lease=result?.lease;
+ attached.label=result?.agent?.label;attached.lease=result?.lease;attached.published=result?.agent?.published===true;
  if(!attached.lease)return attached;
  const lease=attached.lease;
  const timer=setInterval(()=>{local({action:'agent',operation:'heartbeat',lease},opts.binary).catch(()=>{});},opts.heartbeatMs??15_000);

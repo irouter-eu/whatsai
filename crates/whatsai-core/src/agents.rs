@@ -4,6 +4,10 @@
 //! created the first time a coding-agent session attaches from that harness in that checkout,
 //! and kept until retired so messages sent while nobody is there wait for the next session.
 //! A session is one running harness process holding a lease on an agent.
+//!
+//! Attaching is local bookkeeping. The team only learns about an agent once it is published,
+//! either explicitly or, when the owner opts in, automatically for checkouts of the team's own
+//! repository.
 use crate::{client::Client, protocol::*, service::field};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
@@ -53,6 +57,14 @@ impl Client {
                 label
             }
         };
+        // Opt-in only: a checkout of the team's own repository may be published on attach.
+        if self.config("auto_publish")?.as_deref() == Some("team-repo")
+            && let (Some(repo), Ok(team)) = (&repository, self.team())
+            && *repo == team.repository
+        {
+            self.db
+                .execute("UPDATE agents SET published=1 WHERE label=?", [&label])?;
+        }
         let lease = id();
         self.db.execute(
             "INSERT INTO sessions(lease,agent,session,pid,started,heartbeat) VALUES(?,?,?,?,?,?)",
@@ -104,7 +116,7 @@ impl Client {
         let row = self
             .db
             .query_row(
-                "SELECT harness,workspace,repository,created,last_seen,retired,worker,cursor,(SELECT count(*) FROM sessions WHERE agent=label) FROM agents WHERE label=?",
+                "SELECT harness,workspace,repository,created,last_seen,retired,worker,cursor,(SELECT count(*) FROM sessions WHERE agent=label),published FROM agents WHERE label=?",
                 [label],
                 |r| {
                     Ok(json!({
@@ -118,6 +130,7 @@ impl Client {
                         "worker":r.get::<_,Option<String>>(6)?.map(|w|serde_json::from_str::<Value>(&w)).transpose().unwrap_or_default(),
                         "cursor":r.get::<_,i64>(7)?,
                         "sessions":r.get::<_,i64>(8)?,
+                        "published":r.get::<_,i64>(9)?==1,
                     }))
                 },
             )
@@ -142,11 +155,12 @@ impl Client {
         }
         Ok(json!(out))
     }
-    /// What the team gets to see: labels and workspace names, never local paths.
+    /// What the team gets to see: only published agents, as labels and workspace names, never
+    /// local paths.
     pub fn agent_presence(&self) -> Result<Value> {
         self.expire_sessions()?;
         let mut q = self.db.prepare(
-            "SELECT label,harness,workspace,repository,last_seen,(SELECT count(*) FROM sessions WHERE agent=label) FROM agents WHERE retired=0 ORDER BY label",
+            "SELECT label,harness,workspace,repository,last_seen,(SELECT count(*) FROM sessions WHERE agent=label) FROM agents WHERE retired=0 AND published=1 ORDER BY label",
         )?;
         let rows = q.query_map([], |r| {
             Ok(json!({
@@ -160,11 +174,21 @@ impl Client {
         })?;
         Ok(json!(rows.collect::<rusqlite::Result<Vec<_>>>()?))
     }
+    /// Publishing is the one act that lets the team see and address an agent.
+    pub fn publish(&self, label: &str, published: bool) -> Result<Value> {
+        valid_label(label)?;
+        let n = self.db.execute(
+            "UPDATE agents SET published=? WHERE label=? AND retired=0",
+            params![published, label],
+        )?;
+        ensure!(n == 1, "unknown or retired agent");
+        self.agent(label)
+    }
     /// Retiring keeps history but stops the agent being offered or addressed by the team.
     pub fn retire(&self, label: &str) -> Result<Value> {
         valid_label(label)?;
         let n = self.db.execute(
-            "UPDATE agents SET retired=1,worker=NULL WHERE label=?",
+            "UPDATE agents SET retired=1,worker=NULL,published=0 WHERE label=?",
             [label],
         )?;
         ensure!(n == 1, "unknown agent");
@@ -286,6 +310,17 @@ impl Client {
             ),
             "heartbeat" => self.heartbeat(field(cmd, "lease")?),
             "detach" => self.detach(field(cmd, "lease")?),
+            "publish" => self.publish(&self.label_from(cmd)?, true),
+            "unpublish" => self.publish(&self.label_from(cmd)?, false),
+            "auto-publish" => {
+                let mode = field(cmd, "mode")?;
+                ensure!(
+                    ["off", "team-repo"].contains(&mode),
+                    "auto-publish mode is off or team-repo"
+                );
+                self.set("auto_publish", mode)?;
+                Ok(json!({"auto_publish":mode}))
+            }
             "retire" => self.retire(field(cmd, "agent")?),
             "adopt" => self.adopt(field(cmd, "agent")?, Path::new(field(cmd, "workspace")?)),
             "show" => self.agent(field(cmd, "agent")?),

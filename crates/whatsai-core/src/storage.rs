@@ -109,7 +109,7 @@ pub fn base_state() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()))
         .join(".local/share/whatsai")
 }
-pub const CLIENT_MIGRATIONS: &[&str] = &[CLIENT_SCHEMA_V1, CLIENT_SCHEMA_V2];
+pub const CLIENT_MIGRATIONS: &[&str] = &[CLIENT_SCHEMA_V1, CLIENT_SCHEMA_V2, CLIENT_SCHEMA_V3];
 const CLIENT_SCHEMA_V1: &str = r#"
 CREATE TABLE config(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE outbox(id TEXT PRIMARY KEY,envelope TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'queued',error TEXT);
@@ -127,4 +127,8 @@ CREATE TABLE sessions(lease TEXT PRIMARY KEY,agent TEXT NOT NULL REFERENCES agen
 DROP TABLE budgets;
 CREATE TABLE budgets(agent TEXT NOT NULL,root TEXT NOT NULL,used INTEGER NOT NULL,PRIMARY KEY(agent,root));
 DELETE FROM config WHERE key='worker';
+"#;
+/// Nothing about an agent leaves the machine until it is published on purpose.
+const CLIENT_SCHEMA_V3: &str = r#"
+ALTER TABLE agents ADD COLUMN published INTEGER NOT NULL DEFAULT 0;
 "#;

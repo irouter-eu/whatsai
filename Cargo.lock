@@ -4270,7 +4270,7 @@ dependencies = [
 
 [[package]]
 name = "whatsai-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4281,7 +4281,7 @@ dependencies = [
 
 [[package]]
 name = "whatsai-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4306,7 +4306,7 @@ dependencies = [
 
 [[package]]
 name = "whatsai-daemon"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -165,6 +165,13 @@ fn labels_disambiguate_and_adopt_moves_the_work() {
         Some("claude@app")
     );
     assert_eq!(c.resolve_agent("claude", &a).unwrap(), None);
+    assert_eq!(
+        c.agent_presence().unwrap().as_array().unwrap().len(),
+        0,
+        "attaching publishes nothing"
+    );
+    c.publish("claude@app", true).unwrap();
+    c.publish("claude@app-2", true).unwrap();
     c.retire("claude@app-2").unwrap();
     assert_eq!(
         c.resolve_agent("claude", &b).unwrap(),
@@ -180,6 +187,16 @@ fn labels_disambiguate_and_adopt_moves_the_work() {
     assert_eq!(
         presence[0]["workspace"], "app",
         "only the workspace name leaves the machine"
+    );
+    c.publish("claude@app", false).unwrap();
+    assert_eq!(
+        c.agent_presence().unwrap().as_array().unwrap().len(),
+        0,
+        "unpublish hides it again"
+    );
+    assert!(
+        c.publish("claude@app-2", true).is_err(),
+        "retired agents cannot be published"
     );
 }
 
@@ -344,7 +361,7 @@ fn version_one_databases_upgrade_in_place() {
     let v: i64 =
         c.db.pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-    assert_eq!(v, 2);
+    assert_eq!(v, 3);
     assert!(
         c.config("worker").unwrap().is_none(),
         "single-worker binding is retired"
@@ -353,5 +370,63 @@ fn version_one_databases_upgrade_in_place() {
     assert!(
         storage::database(&path, &storage::CLIENT_MIGRATIONS[..1]).is_err(),
         "older binaries refuse the newer schema"
+    );
+}
+
+#[test]
+fn publishing_is_explicit_unless_the_owner_opts_in_for_the_team_repository() {
+    let tmp = TempDir::new().unwrap();
+    let c = Client::open(tmp.path(), "Person").unwrap();
+    let (_, team) = team_with(&c);
+    let ours = tmp.path().join("ours");
+    let theirs = tmp.path().join("theirs");
+    for (dir, remote) in [
+        (&ours, team.repository.as_str()),
+        (&theirs, "https://example.com/other/repo.git"),
+    ] {
+        std::fs::create_dir(dir).unwrap();
+        for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(&args)
+                .output()
+                .unwrap()
+                .status;
+            assert!(status.success());
+        }
+    }
+    let a = c.attach("claude", &ours, None, None, None).unwrap()["agent"].clone();
+    assert_eq!(
+        a["repository"], team.repository,
+        "the checkout's origin is detected"
+    );
+    assert_eq!(
+        a["published"], false,
+        "matching the team repository is not enough by default"
+    );
+    c.agent_command(&json!({"operation":"auto-publish","mode":"team-repo"}))
+        .unwrap();
+    assert!(
+        c.agent_command(&json!({"operation":"auto-publish","mode":"always"}))
+            .is_err()
+    );
+    let b = c.attach("codex", &ours, None, None, None).unwrap()["agent"].clone();
+    assert_eq!(
+        b["published"], true,
+        "opted in: the team repository publishes on attach"
+    );
+    let other = c.attach("claude", &theirs, None, None, None).unwrap()["agent"].clone();
+    assert_eq!(
+        other["published"], false,
+        "other repositories never publish themselves"
+    );
+    let presence = c.agent_presence().unwrap();
+    assert_eq!(presence.as_array().unwrap().len(), 1);
+    assert_eq!(presence[0]["label"], "codex@ours");
+    assert_eq!(
+        c.attach("claude", &ours, None, None, None).unwrap()["agent"]["published"],
+        true,
+        "re-attaching under the opt-in publishes the first agent too"
     );
 }

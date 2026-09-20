@@ -362,7 +362,7 @@ impl Client {
         {
             ensure!(
                 published.iter().any(|a| a["label"] == *label),
-                "recipient has not published an agent named {label}; run list to see theirs"
+                "recipient has not published an agent named {label}; they publish with `whatsai agent publish`, and list shows what is published"
             );
         }
         let eid = id();

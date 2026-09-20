@@ -73,6 +73,8 @@ def main():
    claude_label=attached['agent']['label'];assert claude_label=='claude@app',claude_label
    assert rpc('bob',{'action':'agent','operation':'attach','harness':'codex','workspace':str(ws)})['agent']['label']=='codex@app'
    cli('bob','sync');cli('charlie','sync')
+   assert not cli('charlie','list')['agents'].get(bob),'attaching publishes nothing to the team'
+   cli('bob','agent','publish',claude_label);cli('bob','agent','publish','codex@app');cli('bob','sync');cli('charlie','sync')
    published=cli('charlie','list')['agents'][bob];assert {a['label'] for a in published}=={'claude@app','codex@app'} and all('workspace' in a and '/' not in a['workspace'] for a in published)
    assert cli('charlie','send','wrong label','--to',bob,'--to-agent','claude@nowhere',check=False).returncode!=0
    cli('charlie','send','for claude only','--to',bob,'--to-agent',claude_label);cli('charlie','send','for everyone');cli('charlie','sync');cli('bob','sync')

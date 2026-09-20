@@ -158,6 +158,19 @@ enum AgentCommand {
     Show {
         agent: String,
     },
+    /// Let the team see and address this agent. Nothing is published without this.
+    Publish {
+        agent: String,
+    },
+    /// Hide this agent from the team again; sessions and history stay.
+    Unpublish {
+        agent: String,
+    },
+    /// Whether checkouts of the team's own repository publish themselves on attach.
+    AutoPublish {
+        #[arg(value_parser = ["off", "team-repo"])]
+        mode: String,
+    },
     /// Stop offering this agent to the team; its history stays.
     Retire {
         agent: String,
@@ -313,6 +326,15 @@ async fn main() -> anyhow::Result<()> {
             }
             AgentCommand::Show { agent } => {
                 json!({"action":"agent","operation":"show","agent":agent})
+            }
+            AgentCommand::Publish { agent } => {
+                json!({"action":"agent","operation":"publish","agent":agent})
+            }
+            AgentCommand::Unpublish { agent } => {
+                json!({"action":"agent","operation":"unpublish","agent":agent})
+            }
+            AgentCommand::AutoPublish { mode } => {
+                json!({"action":"agent","operation":"auto-publish","mode":mode})
             }
             AgentCommand::Retire { agent } => {
                 json!({"action":"agent","operation":"retire","agent":agent})

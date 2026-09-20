@@ -54,6 +54,7 @@ Mailbox content is authorized for seven days; expiry does not imply secure erasu
 - **Join fails with authority unreachable:** the founder's daemon is offline or the key predates its relay connection. Ask for a fresh `whatsai invite` output showing `relay: true`.
 - **Membership changed while queued:** the outbox reports a failure; explicitly resend after reviewing the current roster. WhatsAI does not silently share old queued content with newly added members.
 - **Authority unreachable:** queued messages remain local and existing inbox content is readable; new direct transfers also require current authorization from the founder's daemon.
+- **A teammate cannot address my agent:** it is not published. `whatsai agents` shows `published`; `whatsai agent publish LABEL` makes it visible, and `whatsai agent auto-publish team-repo` does so automatically for checkouts of the team repository only.
 - **Messages for an agent never arrive:** run `whatsai agents` and check the label teammates use matches; a retired agent is not offered to the team, and a moved checkout is a new agent until you `whatsai agent adopt` the old label into it. Sessions expire 45 seconds after their harness process stops heartbeating.
 - **Worker authentication error:** authenticate the selected harness locally. The daemon does not receive or repair your model account credentials.
 - **Worker interrupted/failed:** inspect worker status and inbox dispatch state. Uncertain model work is not automatically replayed; send a new explicit request when appropriate.
