@@ -2,6 +2,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use whatsai_core::{crypto::*, governance::*, protocol::*, service::Service, storage};
 const SECRET: &str = "7f3a9c1e5b2d8e4f6a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e1f";
+fn fixture_authority() -> iroh::EndpointAddr {
+    iroh::EndpointAddr::new(iroh::SecretKey::from_bytes(&[9u8; 32]).public())
+}
 
 fn create(a: &Identity, team: &str) -> Signed<Governance> {
     a.sign(Governance {
@@ -12,6 +15,7 @@ fn create(a: &Identity, team: &str) -> Signed<Governance> {
         member: Some(a.member().unwrap()),
         target: None,
         repository: Some("https://example.com/team/repo.git".into()),
+        workspace: None,
     })
     .unwrap()
 }
@@ -30,6 +34,7 @@ fn change(
         member,
         target,
         repository: None,
+        workspace: None,
     })
     .unwrap()
 }
@@ -394,7 +399,8 @@ fn worker_budget_survives_restart_and_inbox_default_does_not_launch() {
         None,
     ));
     let t = replay(&log, &a.member().unwrap().id).unwrap();
-    c.set("team", &serde_json::to_string(&t).unwrap()).unwrap();
+    c.install_team(&t, &fixture_authority(), &"7".repeat(64), None)
+        .unwrap();
     let workspace = tmp.path().join("repo");
     std::fs::create_dir(&workspace).unwrap();
     let label = c.attach("codex", &workspace, None, None, None).unwrap()["agent"]["label"]
@@ -410,7 +416,7 @@ fn worker_budget_survives_restart_and_inbox_default_does_not_launch() {
         .is_err(),
         "workers need an enrolled agent"
     );
-    c.enroll(&label, true).unwrap();
+    c.enroll(&label, true, None).unwrap();
     c.worker_command(&json!({"operation":"bind","agent":label,"adapter":adapter,"default":true}))
         .unwrap();
     let root = id();
@@ -606,6 +612,7 @@ async fn hung_worker_is_timed_out() {
         event: id(),
         sender: "synthetic".into(),
         sender_agent: None,
+        team: id(),
         agent: "codex@test".into(),
         prompt: "test".into(),
         binding: Binding {

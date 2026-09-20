@@ -7,7 +7,8 @@ pub fn replay(history: &[Signed<Governance>], founder: &str) -> Result<Team> {
     let mut team = Team {
         id: history[0].body.team.clone(),
         founder: founder.into(),
-        repository: String::new(),
+        repository: None,
+        workspace: String::new(),
         revision: 0,
         members: BTreeMap::new(),
         admins: vec![],
@@ -36,11 +37,21 @@ pub fn replay(history: &[Signed<Governance>], founder: &str) -> Result<Team> {
                 .ok_or_else(|| anyhow::anyhow!("missing founder"))?;
             ensure!(m.id == founder, "founder mismatch");
             validate_member(m)?;
-            team.repository = g
-                .repository
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("missing repository"))?;
-            validate_remote(&team.repository)?;
+            team.repository = g.repository.clone();
+            if let Some(remote) = &team.repository {
+                validate_remote(remote)?;
+            }
+            team.workspace = match &g.workspace {
+                Some(name) => name.clone(),
+                None => team
+                    .repository
+                    .as_deref()
+                    .and_then(|r| r.trim_end_matches('/').rsplit(['/', ':']).next())
+                    .map(|n| n.trim_end_matches(".git").to_owned())
+                    .filter(|n| !n.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("a team needs a repository or a workspace"))?,
+            };
+            validate_workspace_name(&team.workspace)?;
             team.members.insert(m.id.clone(), m.clone());
             team.admins.push(m.id.clone());
         } else {
@@ -100,6 +111,7 @@ pub fn verify_team(team: &Team, founder: &str) -> Result<()> {
             && expected.members == team.members
             && expected.admins == team.admins
             && expected.repository == team.repository
+            && expected.workspace == team.workspace
             && expected.revision == team.revision,
         "roster differs from governance history"
     );

@@ -22,6 +22,7 @@ pub struct Binding {
 #[derive(Clone)]
 pub struct Work {
     pub event: String,
+    pub team: String,
     pub sender: String,
     pub sender_agent: Option<String>,
     pub agent: String,
@@ -132,22 +133,26 @@ impl Client {
     }
     /// Claim the next message for any enabled worker, one at a time, charging that agent's budget.
     pub fn claim_work(&mut self) -> Result<Option<Work>> {
-        let team = self.team()?;
         let me = self.identity.member()?.id;
-        ensure!(team.members.contains_key(&me), "membership denied");
-        let bound: Vec<(String, String)> = self
+        let bound: Vec<(String, String, String)> = self
             .db
-            .prepare("SELECT label,worker FROM agents WHERE worker IS NOT NULL AND retired=0 AND enrolled=1 ORDER BY label")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .prepare("SELECT label,worker,team FROM agents WHERE worker IS NOT NULL AND retired=0 AND enrolled=1 AND team IS NOT NULL ORDER BY label")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        for (agent, raw) in bound {
+        for (agent, raw, team_id) in bound {
             let binding: Binding = serde_json::from_str(&raw)?;
             if !binding.enabled {
                 continue;
             }
+            let Ok(team) = self.team(&team_id) else {
+                continue;
+            };
+            if !team.members.contains_key(&me) {
+                continue;
+            }
             let row:Option<(String,String,String)>=self.db.query_row(
-                "SELECT id,event,envelope FROM inbox WHERE dispatch='pending' AND json_extract(event,'$.to')=?1 AND (json_extract(event,'$.to_agent')=?2 OR (?3 AND json_extract(event,'$.to_agent') IS NULL)) ORDER BY seq LIMIT 1",
-                params![me,agent,binding.default],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+                "SELECT id,event,envelope FROM inbox WHERE dispatch='pending' AND team=?4 AND json_extract(event,'$.to')=?1 AND (json_extract(event,'$.to_agent')=?2 OR (?3 AND json_extract(event,'$.to_agent') IS NULL)) ORDER BY seq LIMIT 1",
+                params![me,agent,binding.default,team_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
             let Some((eid, text, envelope)) = row else {
                 continue;
             };
@@ -190,6 +195,7 @@ impl Client {
             };
             return Ok(Some(Work {
                 event: eid,
+                team: team_id,
                 sender: env.signer.clone(),
                 sender_agent: event.agent.clone(),
                 prompt: format!(
@@ -214,6 +220,7 @@ impl Client {
                 self.db.execute_batch("BEGIN IMMEDIATE")?;
                 let result = (|| -> Result<()> {
                     self.enqueue(
+                        &work.team,
                         "message",
                         "agent",
                         text,

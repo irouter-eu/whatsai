@@ -52,11 +52,17 @@ async fn exact_commit_handoff_preserves_dirty_tree() {
             member: Some(member.clone()),
             target: None,
             repository: Some("git@localhost:fixture.git".into()),
+            workspace: None,
         })
         .unwrap();
     let team = replay(&[record], &member.id).unwrap();
-    c.set("team", &serde_json::to_string(&team).unwrap())
-        .unwrap();
+    c.install_team(
+        &team,
+        &iroh::EndpointAddr::new(iroh::SecretKey::from_bytes(&[9u8; 32]).public()),
+        &"7".repeat(64),
+        None,
+    )
+    .unwrap();
     let eid = id();
     let ev = Event {
         actor: "agent".into(),

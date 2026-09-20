@@ -32,7 +32,11 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
 }
 impl Client {
     pub async fn accept_handoff(&self, event_id: &str, repo: &Path, dest: &Path) -> Result<Value> {
-        let team = self.team()?;
+        let team = self.team(&self.event_team(event_id)?)?;
+        let remote = team
+            .repository
+            .as_deref()
+            .context("this team has no repository; handoffs need one")?;
         let body: String =
             self.db
                 .query_row("SELECT event FROM inbox WHERE id=?", [event_id], |r| {
@@ -58,7 +62,7 @@ impl Client {
         let configured = git(repo, &["remote", "get-url", "origin"]).await?;
         validate_remote(&configured)?;
         ensure!(
-            configured == team.repository,
+            configured == remote,
             "local origin does not match the team repository; confirm it locally first"
         );
         ensure!(

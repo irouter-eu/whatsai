@@ -7,6 +7,10 @@ struct Args {
     /// State directory; defaults to ~/.local/share/whatsai, one identity per person per machine.
     #[arg(long, env = "WHATSAI_STATE", global = true)]
     state: Option<PathBuf>,
+    /// Which team a command means: id, workspace name, or repository. Defaults to the team the
+    /// current directory is bound to, or the only team you have.
+    #[arg(long, global = true)]
+    team: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -19,6 +23,8 @@ enum Command {
     },
     Register,
     Health,
+    /// Teams you belong to, are joining, or are still creating.
+    Teams,
     Stop,
     Sync,
     Invite,
@@ -53,14 +59,22 @@ enum Command {
         #[arg(long)]
         directory: PathBuf,
     },
-    /// Create a team; this daemon becomes the network's authority.
+    /// Create a team bound to a workspace; this daemon becomes the network's authority.
     Create {
+        /// Credential-free Git remote the team works on. Optional: without one the team is
+        /// bound to the workspace directory alone.
         #[arg(long)]
-        repository: String,
+        repository: Option<String>,
+        /// The workspace directory; its name becomes the team's name.
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
     },
     /// Request admission with a join key from an existing member.
     Join {
         key: String,
+        /// The local directory that will work in this team.
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
     },
     JoinStatus,
     Approve {
@@ -166,10 +180,13 @@ enum AgentCommand {
     Unpublish {
         agent: String,
     },
-    /// Let this agent's sessions take part in the team (read, send, sync). Checkouts of the
-    /// team repository enroll themselves unless auto-enroll is off.
+    /// Let this agent's sessions take part in a team (read, send, sync). Checkouts matching a
+    /// team enroll themselves unless auto-enroll is off.
     Enroll {
         agent: String,
+        /// The team, when the agent's workspace does not identify it.
+        #[arg(long)]
+        into: Option<String>,
     },
     /// Cut this agent's sessions off from the team; unpublishes too.
     Unenroll {
@@ -347,8 +364,8 @@ async fn main() -> anyhow::Result<()> {
             AgentCommand::Unpublish { agent } => {
                 json!({"action":"agent","operation":"unpublish","agent":agent})
             }
-            AgentCommand::Enroll { agent } => {
-                json!({"action":"agent","operation":"enroll","agent":agent})
+            AgentCommand::Enroll { agent, into } => {
+                json!({"action":"agent","operation":"enroll","agent":agent,"team":into})
             }
             AgentCommand::Unenroll { agent } => {
                 json!({"action":"agent","operation":"unenroll","agent":agent})
@@ -400,6 +417,7 @@ async fn main() -> anyhow::Result<()> {
                 json!({"action":"worker","operation":"reset","agent":agent,"root":root})
             }
         },
+        Command::Teams => json!({"action":"teams"}),
         Command::Register => json!({"action":"register"}),
         Command::Health => json!({"action":"health"}),
         Command::Stop => json!({"action":"stop"}),
@@ -409,8 +427,15 @@ async fn main() -> anyhow::Result<()> {
         Command::Requests => json!({"action":"requests"}),
         Command::Inbox { agent, unread } => json!({"action":"inbox","agent":agent,"unread":unread}),
         Command::Outbox => json!({"action":"outbox"}),
-        Command::Create { repository } => json!({"action":"create","repository":repository}),
-        Command::Join { key } => json!({"action":"join","key":key}),
+        Command::Create {
+            repository,
+            workspace,
+        } => {
+            json!({"action":"create","repository":repository,"workspace":std::fs::canonicalize(workspace)?})
+        }
+        Command::Join { key, workspace } => {
+            json!({"action":"join","key":key,"workspace":std::fs::canonicalize(workspace)?})
+        }
         Command::JoinStatus => json!({"action":"join-status"}),
         Command::Approve { member } => json!({"action":"approve","member":member}),
         Command::Reject { member } => json!({"action":"reject","member":member}),
@@ -472,6 +497,13 @@ async fn main() -> anyhow::Result<()> {
             serde_json::from_slice::<Value>(&bytes)?
         }
     };
+    let mut command = command;
+    if let Some(team) = &args.team {
+        command["team"] = json!(team);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        command["cwd"] = json!(cwd);
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&whatsai_core::daemon::request(&state, command).await?)?

@@ -2,6 +2,14 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use whatsai_core::{agents::SESSION_TTL, client::Client, crypto::*, governance::*, protocol::*};
 
+thread_local! {
+    /// The team id the current test installed, for presence checks.
+    static TEAM: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+fn fixture_authority() -> iroh::EndpointAddr {
+    iroh::EndpointAddr::new(iroh::SecretKey::from_bytes(&[9u8; 32]).public())
+}
+
 fn team_with(receiver: &Client) -> (Identity, Team) {
     let a = Identity::generate("Sender");
     let tid = id();
@@ -14,6 +22,7 @@ fn team_with(receiver: &Client) -> (Identity, Team) {
             member: Some(a.member().unwrap()),
             target: None,
             repository: Some("https://example.com/team/repo.git".into()),
+            workspace: None,
         })
         .unwrap();
     let t = replay(std::slice::from_ref(&create), &a.member().unwrap().id).unwrap();
@@ -26,12 +35,14 @@ fn team_with(receiver: &Client) -> (Identity, Team) {
             member: Some(receiver.identity.member().unwrap()),
             target: None,
             repository: None,
+            workspace: None,
         })
         .unwrap();
     let t = replay(&[create, admit], &t.founder).unwrap();
     receiver
-        .set("team", &serde_json::to_string(&t).unwrap())
+        .install_team(&t, &fixture_authority(), &"7".repeat(64), None)
         .unwrap();
+    TEAM.with(|id| *id.borrow_mut() = t.id.clone());
     (a, t)
 }
 fn deliver(
@@ -76,6 +87,7 @@ fn deliver(
 fn agents_are_durable_and_sessions_are_not() {
     let tmp = TempDir::new().unwrap();
     let c = Client::open(tmp.path(), "Person").unwrap();
+    team_with(&c);
     let repo = tmp.path().join("whatsai");
     std::fs::create_dir(&repo).unwrap();
     let first = c
@@ -119,6 +131,7 @@ fn agents_are_durable_and_sessions_are_not() {
 fn labels_disambiguate_and_adopt_moves_the_work() {
     let tmp = TempDir::new().unwrap();
     let c = Client::open(tmp.path(), "Person").unwrap();
+    team_with(&c);
     let a = tmp.path().join("one/app");
     let b = tmp.path().join("two/app");
     std::fs::create_dir_all(&a).unwrap();
@@ -166,7 +179,11 @@ fn labels_disambiguate_and_adopt_moves_the_work() {
     );
     assert_eq!(c.resolve_agent("claude", &a).unwrap(), None);
     assert_eq!(
-        c.agent_presence().unwrap().as_array().unwrap().len(),
+        c.agent_presence(&TEAM.with(|t| t.borrow().clone()))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
         0,
         "attaching publishes nothing"
     );
@@ -178,7 +195,9 @@ fn labels_disambiguate_and_adopt_moves_the_work() {
         None,
         "retired agents are not offered"
     );
-    let presence = c.agent_presence().unwrap();
+    let presence = c
+        .agent_presence(&TEAM.with(|t| t.borrow().clone()))
+        .unwrap();
     assert_eq!(
         presence.as_array().unwrap().len(),
         1,
@@ -190,7 +209,11 @@ fn labels_disambiguate_and_adopt_moves_the_work() {
     );
     c.publish("claude@app", false).unwrap();
     assert_eq!(
-        c.agent_presence().unwrap().as_array().unwrap().len(),
+        c.agent_presence(&TEAM.with(|t| t.borrow().clone()))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
         0,
         "unpublish hides it again"
     );
@@ -215,8 +238,8 @@ fn unread_counts_follow_addressing_and_cursors() {
         .as_str()
         .unwrap()
         .to_owned();
-    c.enroll(&claude, true).unwrap();
-    c.enroll(&codex, true).unwrap();
+    c.enroll(&claude, true, None).unwrap();
+    c.enroll(&codex, true, None).unwrap();
     deliver(&mut c, &sender, &t, 1, Some(&claude), Some("claude@theirs"));
     deliver(&mut c, &sender, &t, 2, Some(&codex), None);
     deliver(&mut c, &sender, &t, 3, None, None);
@@ -236,7 +259,7 @@ fn unread_counts_follow_addressing_and_cursors() {
         ),
         (Some(1), Some(1))
     );
-    let visible = c.inbox_for(Some(&claude), false).unwrap();
+    let visible = c.inbox_for(None, Some(&claude), false).unwrap();
     assert_eq!(
         visible.as_array().unwrap().len(),
         2,
@@ -249,7 +272,7 @@ fn unread_counts_follow_addressing_and_cursors() {
         (Some(0), Some(0))
     );
     assert_eq!(
-        c.inbox_for(Some(&claude), true)
+        c.inbox_for(None, Some(&claude), true)
             .unwrap()
             .as_array()
             .unwrap()
@@ -283,8 +306,8 @@ fn workers_answer_only_their_agent_and_budgets_are_per_agent() {
         .as_str()
         .unwrap()
         .to_owned();
-    c.enroll(&claude, true).unwrap();
-    c.enroll(&codex, true).unwrap();
+    c.enroll(&claude, true, None).unwrap();
+    c.enroll(&codex, true, None).unwrap();
     c.worker_command(&json!({"operation":"bind","agent":claude,"adapter":adapter}))
         .unwrap();
     c.worker_command(&json!({"operation":"bind","agent":codex,"adapter":adapter,"limit":1}))
@@ -365,7 +388,7 @@ fn version_one_databases_upgrade_in_place() {
     let v: i64 =
         c.db.pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-    assert_eq!(v, 4);
+    assert_eq!(v, 5);
     assert!(
         c.config("worker").unwrap().is_none(),
         "single-worker binding is retired"
@@ -385,7 +408,7 @@ fn publishing_is_explicit_unless_the_owner_opts_in_for_the_team_repository() {
     let ours = tmp.path().join("ours");
     let theirs = tmp.path().join("theirs");
     for (dir, remote) in [
-        (&ours, team.repository.as_str()),
+        (&ours, team.repository.as_deref().unwrap()),
         (&theirs, "https://example.com/other/repo.git"),
     ] {
         std::fs::create_dir(dir).unwrap();
@@ -402,7 +425,8 @@ fn publishing_is_explicit_unless_the_owner_opts_in_for_the_team_repository() {
     }
     let a = c.attach("claude", &ours, None, None, None).unwrap()["agent"].clone();
     assert_eq!(
-        a["repository"], team.repository,
+        a["repository"],
+        json!(team.repository),
         "the checkout's origin is detected"
     );
     assert_eq!(
@@ -425,7 +449,9 @@ fn publishing_is_explicit_unless_the_owner_opts_in_for_the_team_repository() {
         other["published"], false,
         "other repositories never publish themselves"
     );
-    let presence = c.agent_presence().unwrap();
+    let presence = c
+        .agent_presence(&TEAM.with(|t| t.borrow().clone()))
+        .unwrap();
     assert_eq!(presence.as_array().unwrap().len(), 1);
     assert_eq!(presence[0]["label"], "codex@ours");
     assert_eq!(
@@ -480,7 +506,7 @@ async fn sessions_touch_the_team_only_through_enrolled_agents() {
         "local actions stay available"
     );
     assert_eq!(
-        c.inbox_for(Some(&label), false)
+        c.inbox_for(None, Some(&label), false)
             .unwrap()
             .as_array()
             .unwrap()
@@ -502,7 +528,7 @@ async fn sessions_touch_the_team_only_through_enrolled_agents() {
         "an unattached session is refused too: {err}"
     );
     // Enrolling opens the team to that agent's sessions; unenrolling closes it and unpublishes.
-    c.enroll(&label, true).unwrap();
+    c.enroll(&label, true, None).unwrap();
     assert_eq!(
         c.command(json!({"action":"inbox","via":label}))
             .await
@@ -514,13 +540,27 @@ async fn sessions_touch_the_team_only_through_enrolled_agents() {
     );
     assert_eq!(c.unread(&label).unwrap()["shared"], 1);
     c.publish(&label, true).unwrap();
-    assert_eq!(c.agent_presence().unwrap().as_array().unwrap().len(), 1);
-    let after = c.enroll(&label, false).unwrap();
+    assert_eq!(
+        c.agent_presence(&TEAM.with(|t| t.borrow().clone()))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let after = c.enroll(&label, false, None).unwrap();
     assert_eq!(
         (after["enrolled"].as_bool(), after["published"].as_bool()),
         (Some(false), Some(false))
     );
-    assert_eq!(c.agent_presence().unwrap().as_array().unwrap().len(), 0);
+    assert_eq!(
+        c.agent_presence(&TEAM.with(|t| t.borrow().clone()))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
     // Publishing an unenrolled agent enrolls it, since publishing means taking part.
     let published = c.publish(&label, true).unwrap();
     assert_eq!(
@@ -535,7 +575,7 @@ async fn sessions_touch_the_team_only_through_enrolled_agents() {
     std::fs::create_dir(&repo).unwrap();
     for args in [
         vec!["init", "-q"],
-        vec!["remote", "add", "origin", t.repository.as_str()],
+        vec!["remote", "add", "origin", t.repository.as_deref().unwrap()],
     ] {
         assert!(
             std::process::Command::new("git")
@@ -558,7 +598,7 @@ async fn sessions_touch_the_team_only_through_enrolled_agents() {
     std::fs::create_dir(&again).unwrap();
     for args in [
         vec!["init", "-q"],
-        vec!["remote", "add", "origin", t.repository.as_str()],
+        vec!["remote", "add", "origin", t.repository.as_deref().unwrap()],
     ] {
         assert!(
             std::process::Command::new("git")

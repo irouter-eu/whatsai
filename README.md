@@ -1,6 +1,6 @@
 # WhatsAI
 
-Private teamwork for people using different coding agents. A local daemon provides a shared inbox, encrypted messages and files, explicit work status, and Git commit handoffs. Codex and Claude connect through the same local API. Teams are their own networks: the founder's daemon is the team's authority, members reach each other over iroh QUIC directly or through a relay, and you join with a key. There is no server to host.
+Private teamwork for people using different coding agents. A local daemon provides a shared inbox, encrypted messages and files, explicit work status, and Git commit handoffs. Codex and Claude connect through the same local API. Teams are their own networks: the founder's daemon is the team's authority, members reach each other over iroh QUIC directly or through a relay, and you join with a key. There is no server to host. A team is bound to a workspace, a Git remote when there is one and the directory itself otherwise, and one person belongs to as many teams as they have workspaces.
 
 This is an early implementation. Local acceptance tests and real-harness smoke tests exist; independent-network acceptance and macOS runtime validation are still required before this is a complete cross-network MVP. See [hosting and operations](docs/operations.md).
 
@@ -25,22 +25,26 @@ The repository does not install background services or alter harness configurati
 
 ## Create and join a team — no server
 
-Alice starts her daemon and creates the team. Her daemon becomes the network's authority and prints the join key:
+Alice starts her daemon and, from the directory the team will work in, creates the team. Her daemon becomes the network's authority and prints the join key:
 
 ```sh
 export WHATSAI_STATE="$PWD/.whatsai/alice"
 whatsai start --name Alice
+cd ~/code/repo
 whatsai create --repository https://example.com/team/repo.git
 whatsai invite
 ```
 
+Git is optional. Without `--repository` the team is bound to the directory alone and named after it; such a team has everything except commit handoffs. With a repository, any checkout of that remote on any machine belongs to the team; without one, only the exact directory the team was created or joined from does, so a stray folder with the same name never joins by accident.
+
 The key is one `whatsai1.` string carrying the team ID, the network secret, Alice's fingerprint, and the address of her daemon. `invite` reports `relay: true` once the daemon has a relay connection; before that the key only reaches Alice on the local network, so wait for it before sending the key to someone elsewhere. Hand the key only to people you want on the team.
 
-Bob starts a daemon with a different state directory, or on another machine, and joins with the key:
+Bob starts a daemon with a different state directory, or on another machine, and joins with the key from the directory he will work in:
 
 ```sh
 export WHATSAI_STATE="$PWD/.whatsai/bob"
 whatsai start --name Bob
+cd ~/code/repo
 whatsai join 'whatsai1.KEY_FROM_ALICE'
 whatsai register
 ```
@@ -53,7 +57,7 @@ whatsai approve BOB_FINGERPRINT
 whatsai promote BOB_FINGERPRINT
 ```
 
-Holding the key is not membership. Requests expire after 24 hours. Admins can `reject`, `demote`, and `revoke`; the last admin cannot leave remaining members without an administrator. Members can `leave`. No election or voting machinery is included.
+One identity, many teams: `whatsai teams` lists them, every command applies to the team the current directory is bound to, and `--team WORKSPACE` picks one from anywhere else. Holding the key is not membership. Requests expire after 24 hours. Admins can `reject`, `demote`, and `revoke`; the last admin cannot leave remaining members without an administrator. Members can `leave`. No election or voting machinery is included.
 
 The founder's daemon is the team's authority in this first implementation: it approves admissions, records membership changes, and holds the encrypted mailbox for members who are offline. While it is offline, new admissions and mailbox delivery wait, and members who are online keep talking to each other directly. Mirroring the authority to every admin's daemon is the next step. Daemons use iroh's public relays by default so teams work across NATs with nothing to host; see [hosting and operations](docs/operations.md) for self-hosted relays and LAN-only setups.
 
@@ -117,7 +121,7 @@ The plugin supplies skills such as `/whatsai:create`, `/whatsai:join`, `/whatsai
 
 You are one member per machine, in `~/.local/share/whatsai` (or `WHATSAI_STATE`), admitted once and holding the keys. Every coding-agent session that opens with the plugin attaches to that identity as an **agent**: `harness@workspace`, for example `claude@whatsai` for Claude Code in a checkout called whatsai, or `codex@billing`. Agents are durable. The first session from a harness in a checkout creates the agent, and it stays, offline, when the session ends, so a message sent to `claude@whatsai` while nothing is open waits for the next Claude session in that directory. Sessions are leases: `whatsai-mcp` attaches on start, heartbeats, and detaches on exit, and any number can share one agent.
 
-Two switches govern what an agent may do, and both default to closed. **Enrolled** lets an agent's sessions take part in the team at all: read the inbox, send, sync, see the join key. A checkout whose origin is the team's repository enrolls itself on attach (turn that off with `whatsai agent auto-enroll off`); any other workspace is refused every team action until you run `whatsai agent enroll LABEL`, so a session working on an unrelated project cannot read this team's messages or leak its key, even though it shares your identity. The daemon enforces this on every call a session makes; your own shell commands are never gated. **Published** is separate. Attaching publishes nothing. An agent stays private to your machine until you publish it with `whatsai agent publish claude@whatsai` (or the tool's `publish` action at your request), and `unpublish` hides it again. Only then do teammates see it in `whatsai list`, as its label, harness, workspace name, repository, and whether a session is live; local paths never leave the machine. `whatsai agent auto-publish team-repo` is the one opt-in: checkouts whose origin is the team's repository publish themselves on attach, everything else stays private. They address a message to you (`--to`), or to one agent (`--to-agent claude@whatsai`); with no agent named it reaches you and all your agents. Status is per agent. `whatsai agents` shows your own agents with sessions, enrolled and published state, worker bindings, and unread counts; `whatsai agent retire LABEL` stops offering one, and `whatsai agent adopt LABEL --workspace PATH` moves an agent to a new checkout so its label and queue follow the work. Two checkouts of the same repository are two agents, named `claude@app` and `claude@app-2`.
+Two switches govern what an agent may do, and both default to closed. **Enrolled** ties an agent to one team and lets its sessions take part there: read the inbox, send, sync, see the join key. A checkout that matches a team enrolls itself on attach, by Git origin for repository-bound teams and by exact path for path-bound ones (turn that off with `whatsai agent auto-enroll off`); any other workspace is refused every team action until you run `whatsai agent enroll LABEL --into WORKSPACE`, so a session working on an unrelated project cannot read a team's messages or leak its key, even though it shares your identity. The daemon enforces this on every call a session makes; your own shell commands are never gated. **Published** is separate. Attaching publishes nothing. An agent stays private to your machine until you publish it with `whatsai agent publish claude@whatsai` (or the tool's `publish` action at your request), and `unpublish` hides it again. Only then do teammates see it in `whatsai list`, as its label, harness, workspace name, repository, and whether a session is live; local paths never leave the machine. `whatsai agent auto-publish team-repo` is the one opt-in: checkouts whose origin is the team's repository publish themselves on attach, everything else stays private. They address a message to you (`--to`), or to one agent (`--to-agent claude@whatsai`); with no agent named it reaches you and all your agents. Status is per agent. `whatsai agents` shows your own agents with sessions, enrolled and published state, worker bindings, and unread counts; `whatsai agent retire LABEL` stops offering one, and `whatsai agent adopt LABEL --workspace PATH` moves an agent to a new checkout so its label and queue follow the work. Two checkouts of the same repository are two agents, named `claude@app` and `claude@app-2`.
 
 In Claude Code, the plugin's prompt hook tells a session when messages are waiting for its agent, and the tool reads them with `inbox` and `{"unread": true}`. The Codex plugin attaches agents the same way through its MCP server.
 

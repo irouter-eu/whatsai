@@ -33,7 +33,8 @@ def main():
    for who in ['alice','bob','charlie']:
     nodes[who]=start(who,[str(BIN/'whatsai-daemon'),'--state',str(base/who),'--name',who]);await_ready(who)
    invitation=cli('alice','create','--repository','https://example.com/team/repo.git')
-   assert invitation['join'].startswith('whatsai1.') and cli('alice','health')['authority']['id']==cli('alice','health')['endpoint']['id']
+   assert invitation['join'].startswith('whatsai1.') and invitation['workspace']=='whatsai'
+   assert cli('alice','health')['teams'][0]['role']=='admin' and cli('alice','teams')[0]['founder']==cli('alice','register')['id']
    tampered=invitation['join'][:-6]+'AAAAAA'
    assert cli('bob','join',tampered,check=False).returncode!=0
    assert cli('bob','join',invitation['join'])['state']=='pending'
@@ -79,7 +80,7 @@ def main():
    # These checkouts are not the team repository, so their sessions are shut out until enrolled.
    assert not rpc_ok('bob',{'action':'list','via':claude_label}) and not rpc_ok('bob',{'action':'invite','via':'unattached'}),'unenrolled sessions are refused team actions'
    cli('bob','agent','enroll',claude_label);cli('bob','agent','enroll','codex@app')
-   assert rpc('bob',{'action':'list','via':claude_label})['id']==rpc('bob',{'action':'health'})['team']['id'],'enrolled sessions get through'
+   assert rpc('bob',{'action':'list','via':claude_label})['id']==cli('bob','teams')[0]['id'],'enrolled sessions get through'
    cli('bob','agent','publish',claude_label);cli('bob','agent','publish','codex@app');cli('bob','sync');cli('charlie','sync')
    published=cli('charlie','list')['agents'][bob];assert {a['label'] for a in published}=={'claude@app','codex@app'} and all('workspace' in a and '/' not in a['workspace'] for a in published)
    assert cli('charlie','send','wrong label','--to',bob,'--to-agent','claude@nowhere',check=False).returncode!=0
@@ -100,7 +101,7 @@ def main():
    cli('charlie','download',fid2,'--directory',str(downloads),'--max-chunks','1')
    cli('bob','revoke',charlie)
    assert cli('charlie','download',fid2,'--directory',str(downloads),check=False).returncode!=0
-   assert cli('charlie','sync',check=False).returncode!=0
+   revoked=cli('charlie','sync');assert revoked['state']=='partial' and 'denied' in ' '.join(revoked['errors']),revoked
    print('PASS revoked member cannot resume file or sync',flush=True)
    assert cli('bob','demote',bob)['admins']==[alice]
    assert cli('bob','promote',bob,check=False).returncode!=0
@@ -108,11 +109,32 @@ def main():
    cli('alice','stop');nodes['alice'].wait(timeout=5)
    offline=cli('bob','send','queued during founder outage')['id']
    assert any(x['id']==offline and x['state']=='queued' for x in cli('bob','outbox'))
-   assert cli('bob','sync',check=False).returncode!=0
+   outage=cli('bob','sync');assert outage['state']=='partial' and 'unreachable' in ' '.join(outage['errors']),outage
    nodes['alice']=start('alice-restart-2',[str(BIN/'whatsai-daemon'),'--state',str(base/'alice'),'--name','alice']);await_ready('alice')
    cli('bob','sync')
    assert any(x['id']==offline and x['state']=='service-stored' for x in cli('bob','outbox'))
    print('PASS founder-outage queueing and recovery on the remembered port',flush=True)
+   # A second, path-bound team with no Git anywhere: bob founds it from a plain directory,
+   # charlie is revoked from the first team but joins this one; commands select teams by directory or --team.
+   notes=base/'bob-notes';notes.mkdir()
+   key2=cli('bob','create','--workspace',str(notes))
+   assert key2['workspace']=='bob-notes' and key2['repository'] is None
+   assert len(cli('bob','teams'))==2
+   assert cli('bob','send','ambiguous',check=False).returncode!=0,'two teams and an unbound directory need --team'
+   charlie_notes=base/'charlie-notes';charlie_notes.mkdir()
+   assert cli('charlie','join',key2['join'],'--workspace',str(charlie_notes))['state']=='pending'
+   cli('bob','--team','bob-notes','approve',charlie);cli('charlie','sync')
+   assert 'bob-notes' in [t['workspace'] for t in cli('charlie','teams')],'charlie is in the notes team'
+   cli('bob','sync');cli('bob','--team','bob-notes','send','notes only');cli('bob','--team','whatsai','send','repo only')
+   cli('bob','sync');cli('charlie','sync')
+   texts=[x['event']['text'] for x in cli('charlie','inbox')]
+   assert 'notes only' in texts and 'repo only' not in texts,'messages stay in their team'
+   assert cli('charlie','handoff','--branch','main','--commit','a'*40,check=False).returncode!=0,'no repository, no handoffs'
+   attached=rpc('charlie',{'action':'agent','operation':'attach','harness':'claude','workspace':str(charlie_notes)})['agent']
+   assert attached['enrolled'] and attached['team_name']=='bob-notes','the joined directory enrolls by exact path'
+   stray=rpc('charlie',{'action':'agent','operation':'attach','harness':'claude','workspace':str(base/'charlie')})['agent']
+   assert not stray['enrolled']
+   print('PASS a second, path-bound team without Git: directory-scoped enrolment, --team selection, messages stay put',flush=True)
   finally:
    for p,log in processes:
     if p.poll() is None:p.terminate()

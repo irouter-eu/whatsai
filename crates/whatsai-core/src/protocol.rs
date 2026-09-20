@@ -56,6 +56,8 @@ pub struct Invite {
     pub founder: String,
     pub secret: String,
     pub authority: Value,
+    #[serde(default)]
+    pub workspace: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Governance {
@@ -66,12 +68,20 @@ pub struct Governance {
     pub member: Option<Member>,
     pub target: Option<String>,
     pub repository: Option<String>,
+    /// The workspace name a team is bound to; set on create, derived from the repository if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Team {
     pub id: String,
     pub founder: String,
-    pub repository: String,
+    /// The credential-free remote the team works on, when it has one. Git is optional: a team
+    /// can be bound to a workspace directory alone.
+    pub repository: Option<String>,
+    /// The workspace name shown to members and used to match checkouts.
+    #[serde(default)]
+    pub workspace: String,
     pub revision: usize,
     pub members: BTreeMap<String, Member>,
     pub admins: Vec<String>,
@@ -139,6 +149,21 @@ impl Event {
         }
         Ok(())
     }
+}
+/// A workspace name is what a team is called and matched by; it must print cleanly anywhere.
+pub fn validate_workspace_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.trim().is_empty() && name.len() <= 64 && !name.chars().any(char::is_control),
+        "invalid workspace name"
+    );
+    Ok(())
+}
+/// The workspace name for a directory: its final component.
+pub fn workspace_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "workspace".into())
 }
 /// Agent labels are `harness@workspace`, short and safe to print anywhere.
 pub fn valid_label(label: &str) -> Result<()> {

@@ -7,6 +7,7 @@ import {attachAgent,detectHarness,detectSession,stamp} from './agent.js';
 
 test('every session call is stamped with its agent, or marked unattached',()=>{
  assert.deepEqual(stamp({action:'list'},{harness:'claude',workspace:'/x',label:'claude@x'}),{action:'list',via:'claude@x'});
+ assert.deepEqual(stamp({action:'list',cwd:'/x'},{harness:'claude',workspace:'/x',label:'claude@x',team:'notes'}),{action:'list',cwd:'/x',via:'claude@x'});
  assert.deepEqual(stamp({action:'list'},{harness:'claude',workspace:'/x'}),{action:'list',via:'unattached'});
 });
 

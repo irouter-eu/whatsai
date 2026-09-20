@@ -109,7 +109,9 @@ async fn run_local(state: &Path, name: &str) -> Result<()> {
         let mut timer = tokio::time::interval(Duration::from_secs(2));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::select! {_=sync_stop.changed()=>break,_=timer.tick()=>{let mut c=sync_client.lock().await;let _=c.expire_sessions();let result=c.sync().await;let _=c.set("last_sync_error",&result.err().map(|e|e.to_string()).unwrap_or_default());
+            tokio::select! {_=sync_stop.changed()=>break,_=timer.tick()=>{let mut c=sync_client.lock().await;let _=c.expire_sessions();let result=c.sync().await;
+            let error=match &result {Ok(v)=>v["errors"].as_array().map(|e|e.iter().filter_map(|x|x.as_str()).collect::<Vec<_>>().join("; ")).unwrap_or_default(),Err(e)=>e.to_string()};
+            let _=c.set("last_sync_error",&error);
             let _=c.set("endpoint",&serde_json::to_string(&sync_endpoint.addr()).unwrap_or_default());
             let batch=direct_batch(&c).unwrap_or_default();drop(c);
             for(eid,recipient,address,envelope)in batch {
@@ -154,23 +156,25 @@ async fn run_local(state: &Path, name: &str) -> Result<()> {
               if request["method"]=="fetch_chunk" {
                let req:Signed<Request>=serde_json::from_value(request["request"].clone())?;crate::crypto::verify(&req)?;
                ensure!(req.body.version==VERSION && now().abs_diff(req.body.timestamp)<=300,"stale peer request");
-               let c=client.lock().await;let team=c.refresh().await?;
+               let team_id=crate::service::field(&req.body.operation,"team")?.to_owned();
+               let c=client.lock().await;let team=c.refresh(&team_id).await?;
                let address:iroh::EndpointAddr=serde_json::from_value(team.endpoints.get(&req.signer).context("unknown peer endpoint")?.clone())?;
                ensure!(address.id==connection.remote_id() && req.body.operation["team"]==team.id,"peer request binding mismatch");
                let file=crate::service::field(&req.body.operation,"file")?;let index=req.body.operation["index"].as_i64().context("missing chunk index")?;ensure!((0..32).contains(&index),"invalid chunk index");
-               c.rpc(json!({"method":"authorize","event":file,"recipient":req.signer})).await?;
+               c.rpc(&team_id,json!({"method":"authorize","event":file,"recipient":req.signer})).await?;
                let body:String=c.db.query_row("SELECT envelope FROM chunks WHERE file=? AND idx=?",rusqlite::params![file,index],|r|r.get(0))?;
                return Ok::<_,anyhow::Error>(json!({"ok":true,"envelope":serde_json::from_str::<Value>(&body)?}));
               }
               ensure!(request["method"]=="deliver","unknown peer operation");
               let env:Signed<Sealed>=serde_json::from_value(request["envelope"].clone())?;crate::crypto::verify(&env)?;
-              let mut c=client.lock().await;let team=c.refresh().await?;
+              let team_id=env.body.header.team.clone();
+              let mut c=client.lock().await;let team=c.refresh(&team_id).await?;
               let addr:iroh::EndpointAddr=serde_json::from_value(team.endpoints.get(&env.signer).context("unknown peer endpoint")?.clone())?;
               ensure!(addr.id==connection.remote_id(),"peer endpoint does not match sender");
-              let auth=c.rpc(json!({"method":"authorize","event":env.body.header.id,"recipient":c.identity.member()?.id})).await?;
+              let auth=c.rpc(&team_id,json!({"method":"authorize","event":env.body.header.id,"recipient":c.identity.member()?.id})).await?;
               ensure!(auth["digest"]==digest(&serde_json::to_vec(&env)?),"envelope does not match stored event");
               c.receive(auth["seq"].as_i64().context("missing sequence")?,&env)?;
-              c.rpc(json!({"method":"ack","event":env.body.header.id})).await?;
+              c.rpc(&team_id,json!({"method":"ack","event":env.body.header.id})).await?;
               Ok::<_,anyhow::Error>(json!({"ok":true}))
              }.await;
              let reply=result.unwrap_or_else(|e|json!({"ok":false,"error":e.to_string()}));send.write_all(&serde_json::to_vec(&reply)?).await?;send.finish()?;let _=connection.closed().await;
@@ -206,13 +210,13 @@ async fn run_local(state: &Path, name: &str) -> Result<()> {
 }
 
 fn direct_batch(c: &Client) -> Result<Vec<(String, String, iroh::EndpointAddr, Value)>> {
-    let Ok(team) = c.team() else {
-        return Ok(vec![]);
-    };
     let me = c.identity.member()?.id;
-    let rows:Vec<(String,String)>=c.db.prepare("SELECT id,envelope FROM outbox WHERE state='service-stored' ORDER BY rowid DESC LIMIT 20")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let rows:Vec<(String,String,Option<String>)>=c.db.prepare("SELECT id,envelope,team FROM outbox WHERE state='service-stored' ORDER BY rowid DESC LIMIT 20")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
     let mut out = vec![];
-    for (eid, body) in rows {
+    for (eid, body, team_id) in rows {
+        let Some(team) = team_id.and_then(|t| c.team(&t).ok()) else {
+            continue;
+        };
         for recipient in team.members.keys() {
             if recipient == &me || c.config(&format!("direct/{eid}/{recipient}"))?.is_some() {
                 continue;

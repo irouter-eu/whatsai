@@ -1,3 +1,4 @@
+//! The local member: one identity, any number of teams, each bound to a workspace.
 use crate::{
     crypto::*,
     governance::*,
@@ -18,6 +19,8 @@ use std::{
     time::Duration,
 };
 
+/// id, state, envelope, error, team.
+type OutboxRow = (String, String, String, Option<String>, Option<String>);
 pub struct Client {
     pub dir: PathBuf,
     pub identity: Identity,
@@ -25,6 +28,18 @@ pub struct Client {
     pub endpoint: Option<iroh::Endpoint>,
     /// The authority this daemon can host for teams it founded; served to peers over iroh.
     pub authority: Option<Arc<Service>>,
+}
+/// One team this member belongs to, as kept locally.
+#[derive(Clone, Debug)]
+pub struct Membership {
+    pub id: String,
+    pub founder: String,
+    pub authority: EndpointAddr,
+    pub secret: String,
+    pub team: Team,
+    pub cursor: i64,
+    /// The local directory this team was created from or joined for, when path-bound.
+    pub path: Option<String>,
 }
 impl Client {
     pub fn open(dir: &Path, name: &str) -> Result<Self> {
@@ -55,10 +70,177 @@ impl Client {
         )?;
         Ok(())
     }
-    pub fn team(&self) -> Result<Team> {
-        serde_json::from_str(&self.config("team")?.context("not a member of a team yet")?)
-            .map_err(Into::into)
+
+    // ------------------------------------------------------------------ teams
+    pub fn memberships(&self) -> Result<Vec<Membership>> {
+        let mut q = self.db.prepare(
+            "SELECT id,founder,authority,secret,team,cursor,path FROM teams ORDER BY joined,id",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, Option<String>>(6)?,
+            ))
+        })?;
+        let mut out = vec![];
+        for row in rows {
+            let (id, founder, authority, secret, team, cursor, path) = row?;
+            out.push(Membership {
+                id,
+                founder,
+                authority: serde_json::from_str(&authority)?,
+                secret,
+                team: serde_json::from_str(&team)?,
+                cursor,
+                path,
+            });
+        }
+        Ok(out)
     }
+    pub fn membership(&self, id: &str) -> Result<Membership> {
+        self.memberships()?
+            .into_iter()
+            .find(|m| m.id == id)
+            .with_context(|| format!("not a member of team {id}"))
+    }
+    pub fn team(&self, id: &str) -> Result<Team> {
+        Ok(self.membership(id)?.team)
+    }
+    /// Record membership of a team locally (creation, admission, or a test fixture).
+    pub fn install_team(
+        &self,
+        team: &Team,
+        authority: &EndpointAddr,
+        secret: &str,
+        path: Option<&Path>,
+    ) -> Result<()> {
+        verify_team(team, &team.founder)?;
+        self.db.execute(
+            "INSERT INTO teams(id,founder,authority,secret,team,cursor,path,joined) VALUES(?,?,?,?,?,0,?,?) ON CONFLICT(id) DO UPDATE SET team=excluded.team,authority=excluded.authority,secret=excluded.secret,path=COALESCE(excluded.path,teams.path)",
+            params![team.id, team.founder, serde_json::to_string(authority)?, secret, serde_json::to_string(team)?, path.map(|p| p.to_string_lossy().into_owned()), now()],
+        )?;
+        Ok(())
+    }
+    fn save_team(&self, t: &Team) -> Result<()> {
+        let old = self.membership(&t.id)?;
+        verify_team(t, &old.founder)?;
+        ensure!(
+            t.history.len() >= old.team.history.len(),
+            "membership rollback detected"
+        );
+        ensure!(
+            serde_json::to_vec(&t.history[..old.team.history.len()])?
+                == serde_json::to_vec(&old.team.history)?,
+            "membership fork detected"
+        );
+        self.db.execute(
+            "UPDATE teams SET team=? WHERE id=?",
+            params![serde_json::to_string(t)?, t.id],
+        )?;
+        Ok(())
+    }
+    /// Teams as the owner sees them, with pending joins and unfinished creations.
+    pub fn teams(&self) -> Result<Value> {
+        let me = self.identity.member()?.id;
+        let mut out = vec![];
+        for m in self.memberships()? {
+            out.push(json!({
+                "id":m.id,
+                "workspace":m.team.workspace,
+                "repository":m.team.repository,
+                "founder":m.founder,
+                "role":if m.team.admins.contains(&me){"admin"}else{"member"},
+                "members":m.team.members.len(),
+                "path":m.path,
+                "state":"member",
+            }));
+        }
+        let mut q = self
+            .db
+            .prepare("SELECT id,invite,path,requested FROM joining ORDER BY requested")?;
+        let rows = q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, invite, path, requested) = row?;
+            let invite: Invite = serde_json::from_str(&invite)?;
+            out.push(json!({"id":id,"workspace":invite.workspace,"founder":invite.founder,"path":path,"state":"joining","requested":requested}));
+        }
+        Ok(json!(out))
+    }
+    /// A team named by id, workspace name, or repository.
+    pub fn find_team(&self, selector: &str) -> Result<String> {
+        let selector = selector.trim();
+        let matches: Vec<Membership> = self
+            .memberships()?
+            .into_iter()
+            .filter(|m| {
+                m.id == selector
+                    || m.team.workspace == selector
+                    || m.team.repository.as_deref() == Some(selector)
+            })
+            .collect();
+        match matches.len() {
+            1 => Ok(matches[0].id.clone()),
+            0 => bail!("no team matches {selector:?}; run teams to see them"),
+            _ => bail!("{selector:?} matches several teams; use the team id"),
+        }
+    }
+    /// The team a directory belongs to: by its Git origin for repository-bound teams, by exact
+    /// path for path-bound ones. Never guesses from a directory name alone.
+    pub fn match_workspace(&self, path: &Path) -> Result<Option<String>> {
+        let canonical = std::fs::canonicalize(path)?;
+        let origin = crate::agents::detect_repository(&canonical);
+        let canonical = canonical.to_string_lossy().into_owned();
+        for m in self.memberships()? {
+            match (&m.team.repository, &origin) {
+                (Some(repo), Some(found)) if repo == found => return Ok(Some(m.id)),
+                (None, _) if m.path.as_deref() == Some(canonical.as_str()) => {
+                    return Ok(Some(m.id));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+    /// Which team a command means: explicit selector, the session's agent, the working
+    /// directory, or the only team there is.
+    pub fn resolve_team(&self, cmd: &Value) -> Result<String> {
+        if let Some(selector) = cmd["team"].as_str() {
+            return self.find_team(selector);
+        }
+        if let Some(via) = cmd["via"].as_str()
+            && let Some(team) = self.is_enrolled(via)?
+        {
+            return Ok(team);
+        }
+        if let Some(cwd) = cmd["cwd"].as_str()
+            && let Some(team) = self.match_workspace(Path::new(cwd))?
+        {
+            return Ok(team);
+        }
+        let all = self.memberships()?;
+        match all.len() {
+            1 => Ok(all[0].id.clone()),
+            0 => bail!("not a member of a team yet"),
+            _ => bail!(
+                "this directory is not bound to one of your {} teams; pass --team WORKSPACE",
+                all.len()
+            ),
+        }
+    }
+
+    // ------------------------------------------------------------------- rpc
     /// Send one signed authority operation to the daemon at `authority`, or answer it locally when
     /// this daemon is that authority.
     pub async fn rpc_at(&self, authority: &EndpointAddr, operation: Value) -> Result<Value> {
@@ -97,12 +279,10 @@ impl Client {
         );
         Ok(reply["result"].clone())
     }
-    fn authority(&self) -> Result<EndpointAddr> {
-        Ok(serde_json::from_str(
-            &self
-                .config("authority")?
-                .context("no authority configured")?,
-        )?)
+    pub async fn rpc(&self, team: &str, mut operation: Value) -> Result<Value> {
+        let m = self.membership(team)?;
+        operation["team"] = json!(m.id);
+        self.rpc_at(&m.authority, operation).await
     }
     /// Wait briefly for a relay connection so a freshly published address reaches across NATs.
     pub async fn wait_online(&self, limit: Duration) {
@@ -112,72 +292,75 @@ impl Client {
             let _ = tokio::time::timeout(limit, endpoint.online()).await;
         }
     }
+    /// This daemon's address; without a bound endpoint (tests, offline tools) it is the bare
+    /// node id, which is still what a local authority is keyed by.
     fn own_address(&self) -> Result<EndpointAddr> {
-        Ok(self
-            .endpoint
-            .as_ref()
-            .context("daemon networking unavailable")?
-            .addr())
-    }
-    pub async fn rpc(&self, mut operation: Value) -> Result<Value> {
-        let team = self.team()?;
-        operation["team"] = json!(team.id);
-        self.rpc_at(&self.authority()?, operation).await
-    }
-    fn save_team(&self, t: &Team, founder: &str) -> Result<()> {
-        verify_team(t, founder)?;
-        if let Ok(old) = self.team() {
-            ensure!(old.id == t.id, "already bound to a different team");
-            ensure!(
-                t.history.len() >= old.history.len(),
-                "membership rollback detected"
-            );
-            ensure!(
-                serde_json::to_vec(&t.history[..old.history.len()])?
-                    == serde_json::to_vec(&old.history)?,
-                "membership fork detected"
-            );
+        if let Some(endpoint) = &self.endpoint {
+            return Ok(endpoint.addr());
         }
-        self.set("team", &serde_json::to_string(t)?)
+        let secret: [u8; 32] = hex::decode(&self.identity.transport)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid transport key"))?;
+        Ok(EndpointAddr::new(
+            iroh::SecretKey::from_bytes(&secret).public(),
+        ))
     }
-    pub async fn refresh(&self) -> Result<Team> {
-        let old = self.team()?;
-        let mut op = json!({"method":"team","agents":self.agent_presence()?});
+    pub async fn refresh(&self, team: &str) -> Result<Team> {
+        let mut op = json!({"method":"team","agents":self.agent_presence(team)?});
         if let Some(ep) = self.config("endpoint")? {
             op["endpoint"] = serde_json::from_str(&ep)?;
         }
-        let next: Team = serde_json::from_value(self.rpc(op).await?)?;
-        self.save_team(&next, &old.founder)?;
+        let next: Team = serde_json::from_value(self.rpc(team, op).await?)?;
+        self.save_team(&next)?;
         // Follow the founder's current address so relay or IP changes do not strand the team.
         if let Some(address) = next.endpoints.get(&next.founder) {
-            self.set("authority", &serde_json::to_string(address)?)?;
+            self.db.execute(
+                "UPDATE teams SET authority=? WHERE id=?",
+                params![serde_json::to_string(address)?, team],
+            )?;
         }
         Ok(next)
     }
-    /// Create a team: this daemon becomes the network's authority and mints the network secret.
-    pub async fn create(&self, repository: &str) -> Result<Value> {
+
+    // ------------------------------------------------------- create and join
+    /// Create a team bound to `workspace`, and to `repository` when there is one: this daemon
+    /// becomes the network's authority and mints the network secret.
+    pub async fn create(&self, repository: Option<&str>, workspace: &Path) -> Result<Value> {
+        let path = std::fs::canonicalize(workspace).context("workspace does not exist")?;
+        ensure!(path.is_dir(), "workspace is not a directory");
+        let repository = repository.map(str::trim).filter(|r| !r.is_empty());
+        if let Some(remote) = repository {
+            validate_remote(remote)?;
+        }
+        let name = workspace_name(&path);
+        validate_workspace_name(&name)?;
         ensure!(
-            self.config("team")?.is_none() && self.config("joining")?.is_none(),
-            "already in a team or joining one"
+            self.match_workspace(&path)?.is_none(),
+            "this workspace already belongs to one of your teams"
         );
-        validate_remote(repository)?;
         ensure!(
             self.authority.is_some(),
             "this daemon cannot host a team authority"
         );
         let member = self.identity.member()?;
-        let (record, secret): (Signed<Governance>, String) =
-            if let Some(saved) = self.config("creation_intent")? {
-                let record: Signed<Governance> = serde_json::from_str(&saved)?;
+        let path_text = path.to_string_lossy().into_owned();
+        let saved: Option<(String, String, String, Option<String>)> = self
+            .db
+            .query_row(
+                "SELECT id,record,secret,repository FROM creating WHERE path=?",
+                [&path_text],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let (record, secret): (Signed<Governance>, String) = match saved {
+            Some((_, record, secret, saved_repository)) => {
                 ensure!(
-                    record.body.repository.as_deref() == Some(repository),
-                    "unfinished creation targets a different repository"
+                    saved_repository.as_deref() == repository,
+                    "unfinished creation for this workspace targets a different repository"
                 );
-                (
-                    record,
-                    self.config("creation_secret")?.context("missing secret")?,
-                )
-            } else {
+                (serde_json::from_str(&record)?, secret)
+            }
+            None => {
                 let record = self.identity.sign(Governance {
                     team: id(),
                     revision: 0,
@@ -185,15 +368,19 @@ impl Client {
                     action: "create".into(),
                     member: Some(member.clone()),
                     target: None,
-                    repository: Some(repository.into()),
+                    repository: repository.map(str::to_owned),
+                    workspace: Some(name.clone()),
                 })?;
                 let mut bytes = [0u8; 32];
                 rand::rngs::OsRng.fill_bytes(&mut bytes);
                 let secret = hex::encode(bytes);
-                self.set("creation_secret", &secret)?;
-                self.set("creation_intent", &serde_json::to_string(&record)?)?;
+                self.db.execute(
+                    "INSERT INTO creating(id,record,secret,path,workspace,repository) VALUES(?,?,?,?,?,?)",
+                    params![record.body.team, serde_json::to_string(&record)?, secret, path_text, name, repository],
+                )?;
                 (record, secret)
-            };
+            }
+        };
         self.wait_online(Duration::from_secs(5)).await;
         let address = self.own_address()?;
         let t: Team = serde_json::from_value(
@@ -203,19 +390,19 @@ impl Client {
             )
             .await?,
         )?;
-        self.set("authority", &serde_json::to_string(&address)?)?;
-        self.set("secret", &secret)?;
-        self.save_team(&t, &member.id)?;
-        self.invite()
+        self.install_team(&t, &address, &secret, Some(&path))?;
+        self.db
+            .execute("DELETE FROM creating WHERE id=?", [&t.id])?;
+        self.invite(&t.id)
     }
     /// The join key. Founders embed their live address so the key improves once a relay is known.
-    pub fn invite(&self) -> Result<Value> {
-        let t = self.team()?;
+    pub fn invite(&self, team: &str) -> Result<Value> {
+        let m = self.membership(team)?;
         let me = self.identity.member()?.id;
-        let authority = if me == t.founder {
+        let authority = if me == m.founder {
             self.own_address()?
         } else {
-            self.authority()?
+            m.authority.clone()
         };
         let relay = authority.relay_urls().next().is_some();
         // With a relay, the node id and relay URL are enough to be found anywhere; direct
@@ -233,21 +420,23 @@ impl Client {
         };
         let card = Invite {
             version: VERSION,
-            team: t.id.clone(),
-            founder: t.founder,
-            secret: self.config("secret")?.context("missing network secret")?,
+            team: m.id.clone(),
+            founder: m.founder.clone(),
+            secret: m.secret.clone(),
             authority: serde_json::to_value(&authority)?,
+            workspace: m.team.workspace.clone(),
         };
         Ok(json!({
-            "team":t.id,
+            "team":m.id,
+            "workspace":m.team.workspace,
+            "repository":m.team.repository,
             "join":"whatsai1.".to_owned()+&B64.encode(serde_json::to_vec(&card)?),
             "relay":relay,
             "notice":if relay {"This key requests admission; an admin must approve your fingerprint."} else {"No relay connection yet: this key only reaches the founder on the local network. Re-run invite once the daemon is online."}
         }))
     }
-    /// Ask the network's authority for admission using a join key.
-    pub async fn join(&self, key: &str) -> Result<Value> {
-        ensure!(self.config("team")?.is_none(), "already a team member");
+    /// Ask a network's authority for admission using a join key, for the given local workspace.
+    pub async fn join(&self, key: &str, workspace: &Path) -> Result<Value> {
         let card: Invite = serde_json::from_slice(
             &B64.decode(key.strip_prefix("whatsai1.").context("invalid join key")?)?,
         )?;
@@ -260,46 +449,73 @@ impl Client {
                 .unwrap_or(false),
             "invalid founder fingerprint"
         );
+        ensure!(
+            self.membership(&card.team).is_err(),
+            "already a member of that team"
+        );
         let authority: EndpointAddr = serde_json::from_value(card.authority.clone())?;
-        if let Some(existing) = self.config("joining")? {
-            let existing: Invite = serde_json::from_str(&existing)?;
-            ensure!(
-                existing.team == card.team && existing.founder == card.founder,
-                "already requesting a different team"
-            );
-        }
-        self.set("joining", &serde_json::to_string(&card)?)?;
-        self.rpc_at(
-            &authority,
-            json!({"method":"request_join","team":card.team,"member":self.identity.member()?,"secret":card.secret}),
-        )
-        .await
-    }
-    pub async fn join_status(&self) -> Result<Value> {
-        let Some(card) = self.config("joining")? else {
-            return Ok(json!({"state":"not-joining"}));
-        };
-        let card: Invite = serde_json::from_str(&card)?;
-        let authority: EndpointAddr = serde_json::from_value(card.authority.clone())?;
-        let result = self
-            .rpc_at(&authority, json!({"method":"join_status","team":card.team}))
+        let path = std::fs::canonicalize(workspace)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
+        self.db.execute(
+            "INSERT INTO joining(id,invite,path,requested) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET invite=excluded.invite,path=COALESCE(excluded.path,joining.path)",
+            params![card.team, serde_json::to_string(&card)?, path, now()],
+        )?;
+        let mut result = self
+            .rpc_at(
+                &authority,
+                json!({"method":"request_join","team":card.team,"member":self.identity.member()?,"secret":card.secret}),
+            )
             .await?;
+        result["team"] = json!(card.team);
+        result["workspace"] = json!(card.workspace);
         if result["state"] == "admitted" {
-            let t: Team = serde_json::from_value(result["team"].clone())?;
-            ensure!(t.id == card.team, "team mismatch");
-            self.save_team(&t, &card.founder)?;
-            self.set("authority", &serde_json::to_string(&authority)?)?;
-            self.set("secret", &card.secret)?;
-            self.db
-                .execute("DELETE FROM config WHERE key='joining'", [])?;
+            self.join_status().await?;
         }
         Ok(result)
     }
-    pub async fn govern(&self, action: &str, target: &str) -> Result<Value> {
-        let t = self.refresh().await?;
+    /// Check every pending join; admitted ones become memberships.
+    pub async fn join_status(&self) -> Result<Value> {
+        let mut q = self
+            .db
+            .prepare("SELECT id,invite,path FROM joining ORDER BY requested")?;
+        let pending: Vec<(String, String, Option<String>)> = q
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(q);
+        let mut out = vec![];
+        for (team, invite, path) in pending {
+            let card: Invite = serde_json::from_str(&invite)?;
+            let authority: EndpointAddr = serde_json::from_value(card.authority.clone())?;
+            let mut result = match self
+                .rpc_at(&authority, json!({"method":"join_status","team":team}))
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => json!({"state":"unknown","error":e.to_string()}),
+            };
+            if result["state"] == "admitted" {
+                let t: Team = serde_json::from_value(result["team"].clone())?;
+                ensure!(
+                    t.id == card.team && t.founder == card.founder,
+                    "team mismatch"
+                );
+                self.install_team(&t, &authority, &card.secret, path.as_deref().map(Path::new))?;
+                self.db.execute("DELETE FROM joining WHERE id=?", [&team])?;
+                // A checkout waiting on this admission joins the team's agents right away.
+                self.enroll_workspace(&t.id)?;
+            }
+            result["team"] = json!(team);
+            result["workspace"] = json!(card.workspace);
+            out.push(result);
+        }
+        Ok(json!(out))
+    }
+    pub async fn govern(&self, team: &str, action: &str, target: &str) -> Result<Value> {
+        let t = self.refresh(team).await?;
         let mut member = None;
         if action == "admit" {
-            let requests = self.rpc(json!({"method":"requests"})).await?;
+            let requests = self.rpc(team, json!({"method":"requests"})).await?;
             let r = requests
                 .as_array()
                 .context("invalid requests")?
@@ -322,18 +538,35 @@ impl Client {
                 Some(target.into())
             },
             repository: None,
+            workspace: None,
         })?;
         let mut log = t.history.clone();
         log.push(record.clone());
         replay(&log, &t.founder)?;
-        let next: Team =
-            serde_json::from_value(self.rpc(json!({"method":"govern","record":record})).await?)?;
-        self.save_team(&next, &t.founder)?;
+        let next: Team = serde_json::from_value(
+            self.rpc(team, json!({"method":"govern","record":record}))
+                .await?,
+        )?;
+        self.save_team(&next)?;
         Ok(json!(next))
     }
+    /// Leaving drops the local membership and every agent's enrolment in it.
+    pub async fn leave(&self, team: &str) -> Result<Value> {
+        let me = self.identity.member()?.id;
+        let result = self.govern(team, "leave", &me).await?;
+        self.db.execute(
+            "UPDATE agents SET enrolled=0,published=0,team=NULL WHERE team=?",
+            [team],
+        )?;
+        self.db.execute("DELETE FROM teams WHERE id=?", [team])?;
+        Ok(result)
+    }
+
+    // ---------------------------------------------------------------- events
     #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
         &self,
+        team: &str,
         kind: &str,
         actor: &str,
         text: &str,
@@ -343,7 +576,7 @@ impl Client {
         agent: Option<String>,
         to_agent: Option<String>,
     ) -> Result<String> {
-        let t = self.team()?;
+        let t = self.team(team)?;
         let me = self.identity.member()?.id;
         ensure!(t.members.contains_key(&me), "not a current member");
         if let Some(target) = &to {
@@ -354,6 +587,10 @@ impl Client {
                 .agent(label)
                 .context("sending agent is not registered here")?;
             ensure!(info["retired"] != true, "sending agent is retired");
+            ensure!(
+                info["team"] == team,
+                "agent {label} is not enrolled in this team"
+            );
         }
         // A fresh address must name an agent the recipient has published; a reply reuses the
         // label that just wrote to us, which is evidence enough even if presence lags.
@@ -367,10 +604,16 @@ impl Client {
         }
         let eid = id();
         let root = if let Some(reply) = &reply_to {
-            let value: String = self
+            let (value, reply_team): (String, Option<String>) = self
                 .db
-                .query_row("SELECT event FROM inbox WHERE id=?", [reply], |r| r.get(0))
+                .query_row("SELECT event,team FROM inbox WHERE id=?", [reply], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
                 .context("reply target is not in local inbox")?;
+            ensure!(
+                reply_team.as_deref() == Some(team),
+                "reply target belongs to another team"
+            );
             serde_json::from_str::<Event>(&value)?.root
         } else {
             eid.clone()
@@ -390,7 +633,7 @@ impl Client {
         let header = Header {
             version: VERSION,
             id: eid.clone(),
-            team: t.id,
+            team: t.id.clone(),
             sender: me,
             created: now(),
             kind: kind.into(),
@@ -400,35 +643,54 @@ impl Client {
             .identity
             .seal(header, &serde_json::to_vec(&event)?, &members)?;
         self.db.execute(
-            "INSERT INTO outbox(id,envelope) VALUES(?,?)",
-            params![eid, serde_json::to_string(&envelope)?],
+            "INSERT INTO outbox(id,envelope,team) VALUES(?,?,?)",
+            params![eid, serde_json::to_string(&envelope)?, t.id],
         )?;
         Ok(eid)
     }
+    /// Sync every pending join and every team; one unreachable authority never blocks the rest.
     pub async fn sync(&mut self) -> Result<Value> {
-        if self.config("joining")?.is_some() {
-            let r = self.join_status().await?;
-            if r["state"] != "admitted" {
-                return Ok(r);
+        let joins = self.join_status().await?;
+        let mut teams = serde_json::Map::new();
+        let mut errors = vec![];
+        for m in self.memberships()? {
+            match self.sync_team(&m.id).await {
+                Ok(v) => {
+                    teams.insert(m.id, v);
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {e:#}", m.team.workspace));
+                    teams.insert(m.id, json!({"state":"error","error":e.to_string()}));
+                }
             }
         }
-        if self.config("team")?.is_none() {
+        if teams.is_empty() && joins.as_array().is_some_and(|j| j.is_empty()) {
             return Ok(json!({"state":"unbound"}));
         }
-        let team = self.refresh().await?;
+        Ok(
+            json!({"state":if errors.is_empty(){"synced"}else{"partial"},"teams":teams,"joining":joins,"errors":errors}),
+        )
+    }
+    async fn sync_team(&mut self, team: &str) -> Result<Value> {
+        let t = self.refresh(team).await?;
         let pending: Vec<(String, String)> = self
             .db
-            .prepare("SELECT id,envelope FROM outbox WHERE state='queued' ORDER BY rowid")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .prepare(
+                "SELECT id,envelope FROM outbox WHERE state='queued' AND team=? ORDER BY rowid",
+            )?
+            .query_map([team], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (eid, body) in pending {
             let envelope: Signed<Sealed> = serde_json::from_str(&body)?;
             // Never silently re-encrypt a queued event for a changed roster.
-            if envelope.body.header.recipients != team.members.keys().cloned().collect::<Vec<_>>() {
+            if envelope.body.header.recipients != t.members.keys().cloned().collect::<Vec<_>>() {
                 self.db.execute("UPDATE outbox SET state='failed',error='Membership changed; explicitly resend with the current roster' WHERE id=?",[&eid])?;
                 continue;
             }
-            match self.rpc(json!({"method":"put","envelope":envelope})).await {
+            match self
+                .rpc(team, json!({"method":"put","envelope":envelope}))
+                .await
+            {
                 Ok(_) => {
                     self.db.execute(
                         "UPDATE outbox SET state='service-stored',error=NULL WHERE id=?",
@@ -443,36 +705,40 @@ impl Client {
                 }
             }
         }
-        let chunks:Vec<(String,i64,String)>=self.db.prepare("SELECT c.file,c.idx,c.envelope FROM chunks c JOIN outbox o ON o.id=c.file WHERE c.state='queued' AND o.state='service-stored'")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+        let chunks:Vec<(String,i64,String)>=self.db.prepare("SELECT c.file,c.idx,c.envelope FROM chunks c JOIN outbox o ON o.id=c.file WHERE c.state='queued' AND o.state='service-stored' AND o.team=?")?.query_map([team],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
         for (file, index, body) in chunks {
             let env: Value = serde_json::from_str(&body)?;
-            self.rpc(json!({"method":"put_chunk","file":file,"index":index,"envelope":env}))
-                .await?;
+            self.rpc(
+                team,
+                json!({"method":"put_chunk","file":file,"index":index,"envelope":env}),
+            )
+            .await?;
             self.db.execute(
                 "UPDATE chunks SET state='service-stored' WHERE file=? AND idx=?",
                 params![file, index],
             )?;
         }
-        let cursor = self
-            .config("cursor")?
-            .unwrap_or_else(|| "0".into())
-            .parse::<i64>()?;
-        let events = self.rpc(json!({"method":"pull","cursor":cursor})).await?;
+        let cursor = self.membership(team)?.cursor;
+        let events = self
+            .rpc(team, json!({"method":"pull","cursor":cursor}))
+            .await?;
         let mut received = 0;
         for row in events.as_array().context("invalid mailbox")? {
             let env: Signed<Sealed> = serde_json::from_value(row["envelope"].clone())?;
             let seq = row["seq"].as_i64().context("missing sequence")?;
             self.receive(seq, &env)?;
-            self.rpc(json!({"method":"ack","event":env.body.header.id}))
+            self.rpc(team, json!({"method":"ack","event":env.body.header.id}))
                 .await?;
-            self.set("cursor", &seq.to_string())?;
+            self.db
+                .execute("UPDATE teams SET cursor=? WHERE id=?", params![seq, team])?;
             received += 1;
         }
         Ok(json!({"state":"synced","received":received}))
     }
     pub fn receive(&mut self, seq: i64, env: &Signed<Sealed>) -> Result<()> {
-        let t = self.team()?;
-        ensure!(env.body.header.team == t.id, "wrong team");
+        let t = self
+            .team(&env.body.header.team)
+            .context("event for a team this member does not belong to")?;
         let event: Event = serde_json::from_slice(&self.identity.open(env)?)?;
         event.validate()?;
         // The authority only returns originally authorized recipients; the sender may since have left.
@@ -484,77 +750,94 @@ impl Client {
         );
         let tx = self.db.transaction()?;
         tx.execute(
-            "INSERT OR IGNORE INTO inbox(id,seq,event,envelope) VALUES(?,?,?,?)",
+            "INSERT OR IGNORE INTO inbox(id,seq,event,envelope,team) VALUES(?,?,?,?,?)",
             params![
                 env.body.header.id,
                 seq,
                 serde_json::to_string(&event)?,
-                serde_json::to_string(env)?
+                serde_json::to_string(env)?,
+                t.id
             ],
         )?;
         tx.commit()?;
         Ok(())
     }
     pub fn inbox(&self) -> Result<Value> {
-        self.inbox_for(None, false)
+        self.inbox_for(None, None, false)
     }
-    /// The inbox as one agent sees it: everything, or only what is addressed to it or shared,
-    /// optionally only what it has not marked read.
-    pub fn inbox_for(&self, agent: Option<&str>, unread_only: bool) -> Result<Value> {
+    /// The inbox for one team, everything, or as one agent sees it: its team only, what is
+    /// addressed to it or shared, optionally only what it has not marked read.
+    pub fn inbox_for(
+        &self,
+        team: Option<&str>,
+        agent: Option<&str>,
+        unread_only: bool,
+    ) -> Result<Value> {
+        let mut team = team.map(str::to_owned);
         let (cursor, label) = match agent {
             Some(label) => {
                 valid_label(label)?;
-                let (cursor, enrolled): (i64, i64) = self
+                let (cursor, agent_team): (i64, Option<String>) = self
                     .db
                     .query_row(
-                        "SELECT cursor,enrolled FROM agents WHERE label=?",
+                        "SELECT cursor,team FROM agents WHERE label=? AND retired=0",
                         [label],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .optional()?
                     .context("unknown agent")?;
-                if enrolled != 1 {
+                let Some(agent_team) = agent_team else {
+                    return Ok(json!([]));
+                };
+                if team.as_deref().is_some_and(|t| t != agent_team) {
                     return Ok(json!([]));
                 }
+                team = Some(agent_team);
                 (if unread_only { cursor } else { 0 }, Some(label.to_owned()))
             }
             None => (0, None),
         };
         let me = self.identity.member()?.id;
         let mut q = self.db.prepare(
-            "SELECT id,seq,event,envelope,dispatch FROM inbox WHERE seq>?1 AND (?2 IS NULL OR json_extract(event,'$.to_agent') IS NULL OR json_extract(event,'$.to_agent')=?2) AND (?2 IS NULL OR json_extract(event,'$.to') IS NULL OR json_extract(event,'$.to')=?3) ORDER BY seq",
+            "SELECT id,seq,event,envelope,dispatch,team FROM inbox WHERE seq>?1 AND (?4 IS NULL OR team=?4) AND (?2 IS NULL OR json_extract(event,'$.to_agent') IS NULL OR json_extract(event,'$.to_agent')=?2) AND (?2 IS NULL OR json_extract(event,'$.to') IS NULL OR json_extract(event,'$.to')=?3) ORDER BY team,seq",
         )?;
-        let rows = q.query_map(params![cursor, label, me], |r| {
+        let rows = q.query_map(params![cursor, label, me, team], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })?;
         let mut out = vec![];
         for row in rows {
-            let (id, seq, event, env, dispatch) = row?;
+            let (id, seq, event, env, dispatch, team) = row?;
             let env: Signed<Sealed> = serde_json::from_str(&env)?;
-            out.push(json!({"id":id,"sequence":seq,"sender":env.signer,"kind":env.body.header.kind,"created":env.body.header.created,"event":serde_json::from_str::<Value>(&event)?,"dispatch":dispatch}));
+            out.push(json!({"id":id,"sequence":seq,"team":team,"sender":env.signer,"kind":env.body.header.kind,"created":env.body.header.created,"event":serde_json::from_str::<Value>(&event)?,"dispatch":dispatch}));
         }
         Ok(json!(out))
     }
-    pub async fn outbox(&self) -> Result<Value> {
-        let rows: Vec<(String, String, String, Option<String>)> = self
+    pub async fn outbox(&self, team: Option<&str>) -> Result<Value> {
+        let rows: Vec<OutboxRow> = self
             .db
-            .prepare("SELECT id,state,envelope,error FROM outbox ORDER BY rowid")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .prepare("SELECT id,state,envelope,error,team FROM outbox WHERE ?1 IS NULL OR team=?1 ORDER BY rowid")?
+            .query_map([team], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut out = vec![];
-        let mut authority_reachable = true;
-        for (eid, state, body, error) in rows {
+        let mut unreachable: Vec<String> = vec![];
+        for (eid, state, body, error, event_team) in rows {
             let env: Signed<Sealed> = serde_json::from_str(&body)?;
-            let mut item =
-                json!({"id":eid,"state":state,"error":error,"kind":env.body.header.kind});
-            if state == "service-stored" && authority_reachable {
-                match self.rpc(json!({"method":"receipts","event":eid})).await {
+            let mut item = json!({"id":eid,"state":state,"error":error,"kind":env.body.header.kind,"team":event_team});
+            if state == "service-stored"
+                && let Some(event_team) = &event_team
+                && !unreachable.contains(event_team)
+            {
+                match self
+                    .rpc(event_team, json!({"method":"receipts","event":eid}))
+                    .await
+                {
                     Ok(receipts) => {
                         if receipts["expired"] == true {
                             item["state"] = json!("expired");
@@ -562,8 +845,8 @@ impl Client {
                         item["receipts"] = receipts;
                     }
                     Err(e) => {
-                        // Stop asking once the authority is known to be unreachable.
-                        authority_reachable = false;
+                        // Stop asking once that authority is known to be unreachable.
+                        unreachable.push(event_team.clone());
                         item["receipts_error"] = json!(e.to_string());
                     }
                 }
@@ -583,7 +866,13 @@ impl Client {
         }
         Ok(json!(out))
     }
-    pub fn share(&mut self, path: &Path, actor: &str, agent: Option<String>) -> Result<String> {
+    pub fn share(
+        &mut self,
+        team: &str,
+        path: &Path,
+        actor: &str,
+        agent: Option<String>,
+    ) -> Result<String> {
         let mut f = std::fs::File::open(path)?;
         let meta = f.metadata()?;
         ensure!(
@@ -611,6 +900,7 @@ impl Client {
         self.db.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<String> {
             let eid = self.enqueue(
+                team,
                 "file",
                 actor,
                 "Shared a file",
@@ -626,7 +916,7 @@ impl Client {
                         r.get(0)
                     })?;
             let base: Signed<Sealed> = serde_json::from_str(&body)?;
-            let members: Vec<_> = self.team()?.members.values().cloned().collect();
+            let members: Vec<_> = self.team(team)?.members.values().cloned().collect();
             for (index, chunk) in content.chunks(CHUNK_SIZE).enumerate() {
                 let mut h = base.body.header.clone();
                 h.kind = format!("chunk/{index}");
@@ -649,13 +939,24 @@ impl Client {
             }
         }
     }
+    /// The team an inbox event belongs to.
+    pub fn event_team(&self, event: &str) -> Result<String> {
+        valid_id(event)?;
+        self.db
+            .query_row("SELECT team FROM inbox WHERE id=?", [event], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten()
+            .context("event is not in the local inbox; sync first")
+    }
     pub async fn download(
         &self,
         file: &str,
         directory: &Path,
         max_chunks: Option<usize>,
     ) -> Result<Value> {
-        valid_id(file)?;
+        let team_id = self.event_team(file)?;
         let body: String = self
             .db
             .query_row("SELECT event FROM inbox WHERE id=?", [file], |r| r.get(0))
@@ -688,7 +989,7 @@ impl Client {
             }
             let mut peer_chunk = None;
             if let Some(endpoint) = &self.endpoint {
-                let team = self.team()?;
+                let team = self.team(&team_id)?;
                 if let Some(address) = team.endpoints.get(&env.signer) {
                     let req=self.identity.sign(Request{version:VERSION,nonce:id(),timestamp:now(),operation:json!({"method":"fetch_chunk","file":file,"index":i,"team":team.id})})?;
                     if let Ok((reply, path)) = crate::transport::exchange(
@@ -708,8 +1009,11 @@ impl Client {
                 Some(v) => v,
                 None => {
                     self.set("last_file_path", "mailbox")?;
-                    self.rpc(json!({"method":"get_chunk","file":file,"index":i}))
-                        .await?
+                    self.rpc(
+                        &team_id,
+                        json!({"method":"get_chunk","file":file,"index":i}),
+                    )
+                    .await?
                 }
             })?;
             ensure!(
@@ -753,9 +1057,9 @@ impl Client {
             json!({"state":"complete","path":dest,"sha256":manifest.sha256,"bytes":manifest.size,"new_chunks":fetched}),
         )
     }
-    /// Latest status per member and per agent, with whether that member is connected now.
-    pub fn statuses(&self) -> Result<Value> {
-        let inbox = self.inbox()?;
+    /// Latest status per member and per agent in a team, with whether that member is connected.
+    pub fn statuses(&self, team: &str) -> Result<Value> {
+        let inbox = self.inbox_for(Some(team), None, false)?;
         let mut statuses = BTreeMap::new();
         for v in inbox.as_array().context("invalid inbox")? {
             if v["kind"] == "status" {
@@ -764,13 +1068,15 @@ impl Client {
                 statuses.insert((member, agent), v.clone());
             }
         }
-        let t = self.team()?;
+        let t = self.team(team)?;
         let mut out = vec![];
         for ((member, agent), status) in statuses {
             out.push(json!({"member":member,"agent":agent,"status":status,"connected":t.presence.get(&member).is_some_and(|seen|now()-seen<15)}));
         }
         Ok(json!(out))
     }
+
+    // --------------------------------------------------------------- command
     /// Actions a coding-agent session may only perform through an agent enrolled in the team.
     /// Owner commands from the shell carry no `via` and are not gated.
     const TEAM_ACTIONS: &[&str] = &[
@@ -801,15 +1107,27 @@ impl Client {
         if Self::TEAM_ACTIONS.contains(&action)
             && let Some(via) = cmd["via"].as_str()
         {
-            ensure!(
-                valid_label(via).is_ok() && self.is_enrolled(via)?,
-                "this workspace's agent {via} is not enrolled in the team; the user can enroll it with `whatsai agent enroll {via}`"
-            );
+            let enrolled = valid_label(via)
+                .ok()
+                .and_then(|_| self.is_enrolled(via).ok().flatten());
+            let Some(agent_team) = enrolled else {
+                bail!(
+                    "this workspace's agent {via} is not enrolled in a team; the user can enroll it with `whatsai agent enroll {via}`"
+                );
+            };
+            if let Some(selector) = cmd["team"].as_str() {
+                ensure!(
+                    self.find_team(selector)? == agent_team,
+                    "agent {via} is enrolled in a different team"
+                );
+            }
         }
+        let team = |cmd: &Value| self.resolve_team(cmd);
         match action {
             "worker" => self.worker_command(&cmd),
             "agent" => self.agent_command(&cmd),
             "agents" => self.agents(),
+            "teams" => self.teams(),
             "accept-handoff" => {
                 self.accept_handoff(
                     field(&cmd, "event")?,
@@ -818,50 +1136,108 @@ impl Client {
                 )
                 .await
             }
-            "files" => Ok(json!(
-                self.inbox()?
-                    .as_array()
-                    .context("invalid inbox")?
-                    .iter()
-                    .filter(|v| v["kind"] == "file")
-                    .collect::<Vec<_>>()
-            )),
+            "files" => {
+                let scope = cmd["team"]
+                    .as_str()
+                    .map(|s| self.find_team(s))
+                    .transpose()?;
+                Ok(json!(
+                    self.inbox_for(scope.as_deref(), cmd["agent"].as_str(), false)?
+                        .as_array()
+                        .context("invalid inbox")?
+                        .iter()
+                        .filter(|v| v["kind"] == "file")
+                        .collect::<Vec<_>>()
+                ))
+            }
             "health" => Ok(
-                json!({"version":VERSION,"state":self.dir,"agents":self.agent_presence()?,"member":self.identity.member()?,"team":self.config("team")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"authority":self.config("authority")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"endpoint":self.config("endpoint")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"last_sync_error":self.config("last_sync_error")?,"last_peer_path":self.config("last_peer_path")?,"last_file_path":self.config("last_file_path")?}),
+                json!({"version":VERSION,"state":self.dir,"member":self.identity.member()?,"teams":self.teams()?,"agents":self.agents()?.as_array().map(|a|a.len()).unwrap_or(0),"endpoint":self.config("endpoint")?.map(|t|serde_json::from_str::<Value>(&t)).transpose()?,"last_sync_error":self.config("last_sync_error")?,"last_peer_path":self.config("last_peer_path")?,"last_file_path":self.config("last_file_path")?}),
             ),
             "register" => Ok(json!(self.identity.member()?)),
-            "create" => self.create(field(&cmd, "repository")?).await,
+            "create" => {
+                let workspace = cmd["workspace"]
+                    .as_str()
+                    .or(cmd["cwd"].as_str())
+                    .context("missing workspace")?;
+                let result = self
+                    .create(cmd["repository"].as_str(), Path::new(workspace))
+                    .await?;
+                // The session that founds a team from a checkout is part of it.
+                if let Some(via) = cmd["via"].as_str()
+                    && valid_label(via).is_ok()
+                    && let Some(team) = result["team"].as_str()
+                {
+                    let _ = self.enroll(via, true, Some(team));
+                }
+                Ok(result)
+            }
             "invite" => {
                 self.wait_online(Duration::from_secs(5)).await;
-                self.invite()
+                self.invite(&team(&cmd)?)
             }
             "join" => {
+                let workspace = cmd["workspace"]
+                    .as_str()
+                    .or(cmd["cwd"].as_str())
+                    .context("missing workspace")?;
                 self.join(
                     cmd["key"]
                         .as_str()
                         .or(cmd["descriptor"].as_str())
                         .context("missing key")?,
+                    Path::new(workspace),
                 )
                 .await
             }
             "join-status" => self.join_status().await,
-            "list" => Ok(json!(self.refresh().await?)),
-            "requests" => self.rpc(json!({"method":"requests"})).await,
-            "approve" => self.govern("admit", field(&cmd, "member")?).await,
-            "reject" => {
-                self.rpc(json!({"method":"reject","member":field(&cmd,"member")?}))
-                    .await
+            "list" => Ok(json!(self.refresh(&team(&cmd)?).await?)),
+            "requests" => {
+                let t = team(&cmd)?;
+                self.rpc(&t, json!({"method":"requests"})).await
             }
-            "promote" | "demote" | "revoke" => self.govern(action, field(&cmd, "member")?).await,
-            "leave" => self.govern("leave", &self.identity.member()?.id).await,
+            "approve" => {
+                let t = team(&cmd)?;
+                self.govern(&t, "admit", field(&cmd, "member")?).await
+            }
+            "reject" => {
+                let t = team(&cmd)?;
+                self.rpc(
+                    &t,
+                    json!({"method":"reject","member":field(&cmd,"member")?}),
+                )
+                .await
+            }
+            "promote" | "demote" | "revoke" => {
+                let t = team(&cmd)?;
+                self.govern(&t, action, field(&cmd, "member")?).await
+            }
+            "leave" => {
+                let t = team(&cmd)?;
+                self.leave(&t).await
+            }
             "sync" => self.sync().await,
-            "inbox" => self.inbox_for(
-                cmd["agent"].as_str(),
-                cmd["unread"].as_bool().unwrap_or(false),
-            ),
-            "outbox" => self.outbox().await,
+            "inbox" => {
+                let scope = cmd["team"]
+                    .as_str()
+                    .map(|s| self.find_team(s))
+                    .transpose()?;
+                self.inbox_for(
+                    scope.as_deref(),
+                    cmd["agent"].as_str(),
+                    cmd["unread"].as_bool().unwrap_or(false),
+                )
+            }
+            "outbox" => {
+                let scope = cmd["team"]
+                    .as_str()
+                    .map(|s| self.find_team(s))
+                    .transpose()?;
+                self.outbox(scope.as_deref()).await
+            }
             "send" | "agent-send" => {
+                let t = team(&cmd)?;
                 let eid = self.enqueue(
+                    &t,
                     "message",
                     if action == "send" { "person" } else { "agent" },
                     field(&cmd, "text")?,
@@ -871,11 +1247,14 @@ impl Client {
                     cmd["agent"].as_str().map(String::from),
                     cmd["to_agent"].as_str().map(String::from),
                 )?;
-                Ok(json!({"id":eid,"state":"queued"}))
+                Ok(json!({"id":eid,"team":t,"state":"queued"}))
             }
-            "share" => Ok(
-                json!({"id":self.share(Path::new(field(&cmd,"path")?),cmd["actor"].as_str().unwrap_or("person"),cmd["agent"].as_str().map(String::from))?,"state":"queued"}),
-            ),
+            "share" => {
+                let t = team(&cmd)?;
+                Ok(
+                    json!({"id":self.share(&t,Path::new(field(&cmd,"path")?),cmd["actor"].as_str().unwrap_or("person"),cmd["agent"].as_str().map(String::from))?,"team":t,"state":"queued"}),
+                )
+            }
             "download" => {
                 self.download(
                     field(&cmd, "file")?,
@@ -885,12 +1264,14 @@ impl Client {
                 .await
             }
             "status" => {
+                let t = team(&cmd)?;
                 if let Some(state) = cmd["state"].as_str() {
                     ensure!(
                         ["working", "blocked", "ready"].contains(&state),
                         "invalid work status"
                     );
                     let eid = self.enqueue(
+                        &t,
                         "status",
                         cmd["actor"].as_str().unwrap_or("person"),
                         cmd["description"].as_str().unwrap_or(""),
@@ -900,19 +1281,34 @@ impl Client {
                         cmd["agent"].as_str().map(String::from),
                         None,
                     )?;
-                    Ok(json!({"id":eid,"state":"queued"}))
+                    Ok(json!({"id":eid,"team":t,"state":"queued"}))
                 } else {
-                    self.statuses()
+                    self.statuses(&t)
                 }
             }
             "handoff" => {
+                let t = team(&cmd)?;
                 let commit = field(&cmd, "commit")?;
                 ensure!(
                     [40, 64].contains(&commit.len()) && hex::decode(commit).is_ok(),
                     "expected full commit hash"
                 );
-                let eid=self.enqueue("handoff",cmd["actor"].as_str().unwrap_or("person"),cmd["description"].as_str().unwrap_or(""),None,None,json!({"repository":self.team()?.id,"commit":commit,"branch":field(&cmd,"branch")?}),cmd["agent"].as_str().map(String::from),None)?;
-                Ok(json!({"id":eid,"state":"queued"}))
+                ensure!(
+                    self.team(&t)?.repository.is_some(),
+                    "this team has no repository; handoffs need one"
+                );
+                let eid = self.enqueue(
+                    &t,
+                    "handoff",
+                    cmd["actor"].as_str().unwrap_or("person"),
+                    cmd["description"].as_str().unwrap_or(""),
+                    None,
+                    None,
+                    json!({"repository":t,"commit":commit,"branch":field(&cmd,"branch")?}),
+                    cmd["agent"].as_str().map(String::from),
+                    None,
+                )?;
+                Ok(json!({"id":eid,"team":t,"state":"queued"}))
             }
             _ => bail!("unknown local operation"),
         }

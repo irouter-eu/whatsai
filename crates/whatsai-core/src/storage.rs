@@ -114,6 +114,7 @@ pub const CLIENT_MIGRATIONS: &[&str] = &[
     CLIENT_SCHEMA_V2,
     CLIENT_SCHEMA_V3,
     CLIENT_SCHEMA_V4,
+    CLIENT_SCHEMA_V5,
 ];
 const CLIENT_SCHEMA_V1: &str = r#"
 CREATE TABLE config(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -140,4 +141,24 @@ ALTER TABLE agents ADD COLUMN published INTEGER NOT NULL DEFAULT 0;
 /// Team access is per workspace: an agent takes part in the team only once enrolled.
 const CLIENT_SCHEMA_V4: &str = r#"
 ALTER TABLE agents ADD COLUMN enrolled INTEGER NOT NULL DEFAULT 0;
+"#;
+/// One member, many teams: per-team rows replace the single-team config keys, events and
+/// agents record which team they belong to, and the previous single team becomes the first row.
+const CLIENT_SCHEMA_V5: &str = r#"
+CREATE TABLE teams(id TEXT PRIMARY KEY,founder TEXT NOT NULL,authority TEXT NOT NULL,secret TEXT NOT NULL,team TEXT NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,path TEXT,joined INTEGER NOT NULL);
+CREATE TABLE joining(id TEXT PRIMARY KEY,invite TEXT NOT NULL,path TEXT,requested INTEGER NOT NULL);
+CREATE TABLE creating(id TEXT PRIMARY KEY,record TEXT NOT NULL,secret TEXT NOT NULL,path TEXT,workspace TEXT NOT NULL,repository TEXT);
+ALTER TABLE outbox ADD COLUMN team TEXT;
+ALTER TABLE inbox ADD COLUMN team TEXT;
+ALTER TABLE agents ADD COLUMN team TEXT;
+INSERT INTO teams(id,founder,authority,secret,team,cursor,path,joined)
+  SELECT json_extract(t.value,'$.id'),json_extract(t.value,'$.founder'),a.value,s.value,t.value,COALESCE(CAST(c.value AS INTEGER),0),NULL,strftime('%s','now')
+  FROM config t JOIN config a ON a.key='authority' JOIN config s ON s.key='secret' LEFT JOIN config c ON c.key='cursor'
+  WHERE t.key='team';
+INSERT INTO joining(id,invite,path,requested) SELECT json_extract(value,'$.team'),value,NULL,strftime('%s','now') FROM config WHERE key='joining';
+UPDATE outbox SET team=json_extract(envelope,'$.body.header.team');
+UPDATE inbox SET team=json_extract(envelope,'$.body.header.team');
+UPDATE agents SET team=(SELECT id FROM teams LIMIT 1) WHERE enrolled=1;
+UPDATE agents SET enrolled=0 WHERE team IS NULL;
+DELETE FROM config WHERE key IN ('team','authority','secret','cursor','joining','creation_intent','creation_secret');
 "#;

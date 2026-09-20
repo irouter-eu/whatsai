@@ -5,9 +5,10 @@
 //! and kept until retired so messages sent while nobody is there wait for the next session.
 //! A session is one running harness process holding a lease on an agent.
 //!
-//! Attaching is local bookkeeping. An agent takes part in the team only once it is enrolled:
-//! automatically when its checkout's origin is the team's repository (unless auto-enroll is
-//! off), otherwise on the owner's say-so. Sessions of unenrolled agents cannot read, send, or
+//! Attaching is local bookkeeping. An agent takes part in one team only once it is enrolled
+//! there: automatically when its checkout matches a team, by Git origin for repository-bound
+//! teams or by exact path for path-bound ones (unless auto-enroll is off), otherwise on the
+//! owner's say-so. Sessions of unenrolled agents cannot read, send, or
 //! see the join key. Publishing, which lets the team see and address the agent, is a further
 //! explicit step, with one opt-in for checkouts of the team's own repository.
 use crate::{client::Client, protocol::*, service::field};
@@ -59,19 +60,19 @@ impl Client {
                 label
             }
         };
-        // A checkout of the team's own repository is part of the team unless the owner says
+        // A checkout that matches one of our teams is part of it unless the owner says
         // otherwise; publishing it too is a separate opt-in.
-        if let (Some(repo), Ok(team)) = (&repository, self.team())
-            && *repo == team.repository
-        {
+        if let Some(team) = self.match_workspace(Path::new(&workspace))? {
             if self.config("auto_enroll")?.as_deref() != Some("off") {
-                self.db
-                    .execute("UPDATE agents SET enrolled=1 WHERE label=?", [&label])?;
+                self.db.execute(
+                    "UPDATE agents SET enrolled=1,team=? WHERE label=?",
+                    params![team, label],
+                )?;
             }
             if self.config("auto_publish")?.as_deref() == Some("team-repo") {
                 self.db.execute(
-                    "UPDATE agents SET published=1,enrolled=1 WHERE label=?",
-                    [&label],
+                    "UPDATE agents SET published=1,enrolled=1,team=? WHERE label=?",
+                    params![team, label],
                 )?;
             }
         }
@@ -126,7 +127,7 @@ impl Client {
         let row = self
             .db
             .query_row(
-                "SELECT harness,workspace,repository,created,last_seen,retired,worker,cursor,(SELECT count(*) FROM sessions WHERE agent=label),published,enrolled FROM agents WHERE label=?",
+                "SELECT harness,workspace,repository,created,last_seen,retired,worker,cursor,(SELECT count(*) FROM sessions WHERE agent=label),published,enrolled,team FROM agents WHERE label=?",
                 [label],
                 |r| {
                     Ok(json!({
@@ -142,6 +143,7 @@ impl Client {
                         "sessions":r.get::<_,i64>(8)?,
                         "published":r.get::<_,i64>(9)?==1,
                         "enrolled":r.get::<_,i64>(10)?==1,
+                        "team":r.get::<_,Option<String>>(11)?,
                     }))
                 },
             )
@@ -149,6 +151,11 @@ impl Client {
             .context("unknown agent")?;
         let mut row = row;
         row["online"] = json!(row["sessions"].as_i64().unwrap_or(0) > 0);
+        row["team_name"] = row["team"]
+            .as_str()
+            .and_then(|t| self.team(t).ok())
+            .map(|t| json!(t.workspace))
+            .unwrap_or(Value::Null);
         Ok(row)
     }
     pub fn agents(&self) -> Result<Value> {
@@ -168,12 +175,12 @@ impl Client {
     }
     /// What the team gets to see: only published agents, as labels and workspace names, never
     /// local paths.
-    pub fn agent_presence(&self) -> Result<Value> {
+    pub fn agent_presence(&self, team: &str) -> Result<Value> {
         self.expire_sessions()?;
         let mut q = self.db.prepare(
-            "SELECT label,harness,workspace,repository,last_seen,(SELECT count(*) FROM sessions WHERE agent=label) FROM agents WHERE retired=0 AND published=1 AND enrolled=1 ORDER BY label",
+            "SELECT label,harness,workspace,repository,last_seen,(SELECT count(*) FROM sessions WHERE agent=label) FROM agents WHERE retired=0 AND published=1 AND enrolled=1 AND team=? ORDER BY label",
         )?;
-        let rows = q.query_map([], |r| {
+        let rows = q.query_map([team], |r| {
             Ok(json!({
                 "label":r.get::<_,String>(0)?,
                 "harness":r.get::<_,String>(1)?,
@@ -186,12 +193,15 @@ impl Client {
         Ok(json!(rows.collect::<rusqlite::Result<Vec<_>>>()?))
     }
     /// Publishing is the one act that lets the team see and address an agent; it implies
-    /// taking part, so it enrolls too.
+    /// taking part, so it enrolls too when the team is unambiguous.
     pub fn publish(&self, label: &str, published: bool) -> Result<Value> {
         valid_label(label)?;
         let n = if published {
+            if self.is_enrolled(label)?.is_none() {
+                self.enroll(label, true, None)?;
+            }
             self.db.execute(
-                "UPDATE agents SET published=1,enrolled=1 WHERE label=? AND retired=0",
+                "UPDATE agents SET published=1 WHERE label=? AND retired=0",
                 [label],
             )?
         } else {
@@ -203,40 +213,81 @@ impl Client {
         ensure!(n == 1, "unknown or retired agent");
         self.agent(label)
     }
-    /// Enrolment is what lets an agent's sessions take part in the team at all.
-    pub fn enroll(&self, label: &str, enrolled: bool) -> Result<Value> {
+    /// Enrolment is what lets an agent's sessions take part in a team at all. The team is
+    /// given, matched from the agent's workspace, or the only one there is.
+    pub fn enroll(&self, label: &str, enrolled: bool, team: Option<&str>) -> Result<Value> {
         valid_label(label)?;
         let n = if enrolled {
+            let info = self.agent(label)?;
+            let team = match team {
+                Some(selector) => self.find_team(selector)?,
+                None => {
+                    let workspace = info["workspace"].as_str().unwrap_or_default();
+                    match self.match_workspace(Path::new(workspace))? {
+                        Some(t) => t,
+                        None => {
+                            let all = self.memberships()?;
+                            ensure!(
+                                all.len() == 1,
+                                "say which team: `whatsai agent enroll {label} --team WORKSPACE`"
+                            );
+                            all[0].id.clone()
+                        }
+                    }
+                }
+            };
             self.db.execute(
-                "UPDATE agents SET enrolled=1 WHERE label=? AND retired=0",
-                [label],
+                "UPDATE agents SET enrolled=1,team=? WHERE label=? AND retired=0",
+                params![team, label],
             )?
         } else {
             self.db.execute(
-                "UPDATE agents SET enrolled=0,published=0 WHERE label=? AND retired=0",
+                "UPDATE agents SET enrolled=0,published=0,team=NULL WHERE label=? AND retired=0",
                 [label],
             )?
         };
         ensure!(n == 1, "unknown or retired agent");
         self.agent(label)
     }
-    /// Whether a session acting through `label` may touch the team at all.
-    pub fn is_enrolled(&self, label: &str) -> Result<bool> {
+    /// Enroll every attached agent whose checkout matches `team`, after joining it.
+    pub fn enroll_workspace(&self, team: &str) -> Result<usize> {
+        if self.config("auto_enroll")?.as_deref() == Some("off") {
+            return Ok(0);
+        }
+        let candidates: Vec<(String, String)> = self
+            .db
+            .prepare("SELECT label,workspace FROM agents WHERE retired=0 AND team IS NULL")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut n = 0;
+        for (label, workspace) in candidates {
+            if self.match_workspace(Path::new(&workspace))?.as_deref() == Some(team) {
+                self.db.execute(
+                    "UPDATE agents SET enrolled=1,team=? WHERE label=?",
+                    params![team, label],
+                )?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+    /// The team a session acting through `label` may touch, if any.
+    pub fn is_enrolled(&self, label: &str) -> Result<Option<String>> {
         Ok(self
             .db
             .query_row(
-                "SELECT enrolled FROM agents WHERE label=? AND retired=0",
+                "SELECT team FROM agents WHERE label=? AND retired=0 AND enrolled=1",
                 [label],
-                |r| r.get::<_, i64>(0),
+                |r| r.get::<_, Option<String>>(0),
             )
             .optional()?
-            .is_some_and(|e| e == 1))
+            .flatten())
     }
     /// Retiring keeps history but stops the agent being offered or addressed by the team.
     pub fn retire(&self, label: &str) -> Result<Value> {
         valid_label(label)?;
         let n = self.db.execute(
-            "UPDATE agents SET retired=1,worker=NULL,published=0,enrolled=0 WHERE label=?",
+            "UPDATE agents SET retired=1,worker=NULL,published=0,enrolled=0,team=NULL WHERE label=?",
             [label],
         )?;
         ensure!(n == 1, "unknown agent");
@@ -275,43 +326,46 @@ impl Client {
         )?;
         self.agent(label)
     }
-    /// Unread counts for one agent: addressed to it explicitly, and shared (to the member or
-    /// to everyone) that it has not marked read yet. Own messages never count.
+    /// Unread counts for one agent in its team: addressed to it explicitly, and shared (to the
+    /// member or to everyone) that it has not marked read yet. Own messages never count.
     pub fn unread(&self, label: &str) -> Result<Value> {
-        let (cursor, enrolled): (i64, i64) = self
+        let (cursor, team): (i64, Option<String>) = self
             .db
             .query_row(
-                "SELECT cursor,enrolled FROM agents WHERE label=?",
+                "SELECT cursor,team FROM agents WHERE label=? AND retired=0",
                 [label],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
             .context("unknown agent")?;
-        if enrolled != 1 {
+        let Some(team) = team else {
             return Ok(
                 json!({"agent":label,"addressed":0,"shared":0,"cursor":cursor,"enrolled":false}),
             );
-        }
+        };
         let me = self.identity.member()?.id;
         let count = |sql: &str| -> Result<i64> {
             Ok(self
                 .db
-                .query_row(sql, params![cursor, me, label], |r| r.get(0))?)
+                .query_row(sql, params![cursor, me, label, team], |r| r.get(0))?)
         };
         let addressed = count(
-            "SELECT count(*) FROM inbox WHERE seq>?1 AND json_extract(envelope,'$.signer')!=?2 AND json_extract(event,'$.to')=?2 AND json_extract(event,'$.to_agent')=?3",
+            "SELECT count(*) FROM inbox WHERE seq>?1 AND team=?4 AND json_extract(envelope,'$.signer')!=?2 AND json_extract(event,'$.to')=?2 AND json_extract(event,'$.to_agent')=?3",
         )?;
         let shared = count(
-            "SELECT count(*) FROM inbox WHERE seq>?1 AND json_extract(envelope,'$.signer')!=?2 AND json_extract(event,'$.to_agent') IS NULL AND (json_extract(event,'$.to') IS NULL OR json_extract(event,'$.to')=?2) AND ?3=?3",
+            "SELECT count(*) FROM inbox WHERE seq>?1 AND team=?4 AND json_extract(envelope,'$.signer')!=?2 AND json_extract(event,'$.to_agent') IS NULL AND (json_extract(event,'$.to') IS NULL OR json_extract(event,'$.to')=?2) AND ?3=?3",
         )?;
         Ok(
-            json!({"agent":label,"addressed":addressed,"shared":shared,"cursor":cursor,"enrolled":true}),
+            json!({"agent":label,"addressed":addressed,"shared":shared,"cursor":cursor,"enrolled":true,"team":team}),
         )
     }
     pub fn mark_read(&self, label: &str) -> Result<Value> {
-        let latest: i64 = self
-            .db
-            .query_row("SELECT COALESCE(max(seq),0) FROM inbox", [], |r| r.get(0))?;
+        let team = self.is_enrolled(label)?;
+        let latest: i64 = self.db.query_row(
+            "SELECT COALESCE(max(seq),0) FROM inbox WHERE ?1 IS NULL OR team=?1",
+            [team],
+            |r| r.get(0),
+        )?;
         let n = self.db.execute(
             "UPDATE agents SET cursor=? WHERE label=?",
             params![latest, label],
@@ -369,8 +423,8 @@ impl Client {
             "detach" => self.detach(field(cmd, "lease")?),
             "publish" => self.publish(&self.label_from(cmd)?, true),
             "unpublish" => self.publish(&self.label_from(cmd)?, false),
-            "enroll" => self.enroll(&self.label_from(cmd)?, true),
-            "unenroll" => self.enroll(&self.label_from(cmd)?, false),
+            "enroll" => self.enroll(&self.label_from(cmd)?, true, cmd["team"].as_str()),
+            "unenroll" => self.enroll(&self.label_from(cmd)?, false, None),
             "auto-enroll" => {
                 let mode = field(cmd, "mode")?;
                 ensure!(
@@ -415,8 +469,9 @@ fn canonical_workspace(path: &Path) -> Result<String> {
     ensure!(canonical.is_dir(), "workspace is not a directory");
     Ok(canonical.to_string_lossy().into_owned())
 }
-/// The checkout's origin, used to show which agents are on the team repository. Never fails.
-fn detect_repository(workspace: &Path) -> Option<String> {
+/// The checkout's origin, used to match teams and to show which agents are on a repository.
+/// Git is optional: no git, or no remote, simply means none.
+pub fn detect_repository(workspace: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["-C"])
         .arg(workspace)
