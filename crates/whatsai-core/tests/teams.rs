@@ -311,84 +311,204 @@ async fn the_founding_session_is_visible_in_its_team() {
 }
 
 #[test]
-fn people_and_agents_are_addressable_by_name() {
+fn people_and_their_sessions_are_addressable_by_name() {
     use whatsai_core::{client::resolve_address, crypto::Identity, protocol::*};
-    let alice = Identity::generate("alice").member().unwrap();
-    let bob = Identity::generate("bob").member().unwrap();
-    let bob2 = Identity::generate("bob").member().unwrap();
-    let mut team = whatsai_core::governance::replay(
-        &[Identity::generate("x")
+    let alice = Identity::generate("Alice Smith");
+    let bob = Identity::generate("bob");
+    let bob2 = Identity::generate("Bob");
+    let founder = alice.member().unwrap();
+    let mut history = vec![
+        alice
             .sign(Governance {
                 team: id(),
                 revision: 0,
                 previous: String::new(),
                 action: "create".into(),
-                member: None,
+                member: Some(founder.clone()),
                 target: None,
                 repository: None,
-                workspace: Some("t".into()),
+                workspace: Some("copyk8".into()),
             })
-            .unwrap()],
-        "",
-    )
-    .err()
-    .map(|_| Team {
-        id: id(),
-        founder: alice.id.clone(),
-        repository: None,
-        workspace: "t".into(),
-        revision: 0,
-        members: [
-            (alice.id.clone(), alice.clone()),
-            (bob.id.clone(), bob.clone()),
-            (bob2.id.clone(), bob2.clone()),
-        ]
-        .into(),
-        admins: vec![alice.id.clone()],
-        history: vec![],
-        presence: Default::default(),
-        endpoints: Default::default(),
-        agents: Default::default(),
-    })
-    .unwrap();
+            .unwrap(),
+    ];
+    for who in [&bob, &bob2] {
+        let previous = digest(&serde_json::to_vec(history.last().unwrap()).unwrap());
+        history.push(
+            alice
+                .sign(Governance {
+                    team: history[0].body.team.clone(),
+                    revision: history.len(),
+                    previous,
+                    action: "admit".into(),
+                    member: Some(who.member().unwrap()),
+                    target: None,
+                    repository: None,
+                    workspace: None,
+                })
+                .unwrap(),
+        );
+    }
+    let mut team = whatsai_core::governance::replay(&history, &founder.id).unwrap();
+    let handles = member_handles(&team);
+    assert_eq!(handles[&founder.id], "alice-smith");
+    assert_eq!(handles[&bob.member().unwrap().id], "bob");
+    assert_eq!(
+        handles[&bob2.member().unwrap().id],
+        "bob-2",
+        "same name, admission order decides"
+    );
+    // Everyone runs Claude in copyk8; alice also has a second Claude checkout and a Codex.
     team.agents.insert(
-        alice.id.clone(),
-        json!([{"label":"claude@copyk8"},{"label":"codex@copyk8"}]),
+        founder.id.clone(),
+        json!([
+            {"label":"codex@copyk8","harness":"codex","online":true},
+            {"label":"claude@copyk8","harness":"claude","online":true},
+            {"label":"claude@copyk8-2","harness":"claude","online":false},
+        ]),
     );
-    team.agents
-        .insert(bob.id.clone(), json!([{"label":"claude@copyk8"}]));
+    team.agents.insert(
+        bob.member().unwrap().id.clone(),
+        json!([{"label":"claude@copyk8","harness":"claude","online":true}]),
+    );
+    let names: Vec<String> = participants(&team).into_iter().map(|p| p.handle).collect();
     assert_eq!(
-        resolve_address(&team, "alice").unwrap(),
-        (alice.id.clone(), None)
+        names,
+        vec![
+            "alice-smith/claude",
+            "alice-smith/claude-2",
+            "alice-smith/codex",
+            "bob/claude"
+        ]
     );
     assert_eq!(
-        resolve_address(&team, &alice.id).unwrap(),
-        (alice.id.clone(), None)
+        handle_of(&team, &founder.id, "claude@copyk8-2").as_deref(),
+        Some("alice-smith/claude-2")
+    );
+    // People by handle, display name, or fingerprint.
+    assert_eq!(
+        resolve_address(&team, "alice-smith").unwrap(),
+        (founder.id.clone(), None)
     );
     assert_eq!(
-        resolve_address(&team, "codex@copyk8").unwrap(),
-        (alice.id.clone(), Some("codex@copyk8".into()))
+        resolve_address(&team, "Alice Smith").unwrap(),
+        (founder.id.clone(), None)
     );
     assert_eq!(
-        resolve_address(&team, "alice/claude@copyk8").unwrap(),
-        (alice.id.clone(), Some("claude@copyk8".into()))
+        resolve_address(&team, &founder.id).unwrap(),
+        (founder.id.clone(), None)
     );
-    let err = resolve_address(&team, "claude@copyk8")
-        .unwrap_err()
-        .to_string();
+    assert_eq!(
+        resolve_address(&team, "bob-2").unwrap(),
+        (bob2.member().unwrap().id.clone(), None)
+    );
+    // Sessions by person/handle; the label the recipient routes on comes back with it.
+    assert_eq!(
+        resolve_address(&team, "bob/claude").unwrap(),
+        (
+            bob.member().unwrap().id.clone(),
+            Some("claude@copyk8".into())
+        )
+    );
+    assert_eq!(
+        resolve_address(&team, "alice-smith/claude-2").unwrap(),
+        (founder.id.clone(), Some("claude@copyk8-2".into()))
+    );
+    assert_eq!(
+        resolve_address(&team, "alice-smith/codex").unwrap(),
+        (founder.id.clone(), Some("codex@copyk8".into()))
+    );
+    // Bare handles work only when unique in the team, and say who the candidates are.
+    assert_eq!(
+        resolve_address(&team, "codex").unwrap(),
+        (founder.id.clone(), Some("codex@copyk8".into()))
+    );
+    let err = resolve_address(&team, "claude").unwrap_err().to_string();
     assert!(
-        err.contains("several members"),
-        "two members publish that label: {err}"
+        err.contains("alice-smith/claude") && err.contains("bob/claude"),
+        "{err}"
     );
-    let err = resolve_address(&team, "bob").unwrap_err().to_string();
-    assert!(
-        err.contains("several members"),
-        "two members are called bob: {err}"
-    );
+    // "bob" is the first bob's handle; the display name "Bob" fits both and must be qualified.
     assert_eq!(
-        resolve_address(&team, &format!("{}/claude@copyk8", bob.id)).unwrap(),
-        (bob.id.clone(), Some("claude@copyk8".into()))
+        resolve_address(&team, "bob").unwrap(),
+        (bob.member().unwrap().id.clone(), None)
     );
+    let err = resolve_address(&team, "Bob").unwrap_err().to_string();
+    assert!(err.contains("several members"), "{err}");
     assert!(resolve_address(&team, "carol").is_err());
-    assert!(resolve_address(&team, "alice/nothing@here").is_err());
+    assert!(resolve_address(&team, "bob/codex").is_err());
+    // Still nothing lets a local label collide: the old label form resolves only when unique.
+    assert_eq!(
+        resolve_address(&team, "codex@copyk8").unwrap().1.as_deref(),
+        Some("codex@copyk8")
+    );
+    assert!(resolve_address(&team, "claude@copyk8").is_err());
+}
+
+#[tokio::test]
+async fn a_taken_name_is_refused_with_a_free_suggestion_and_sessions_can_be_named() {
+    use whatsai_core::{protocol::*, service::Service};
+    let tmp = TempDir::new().unwrap();
+    let c = founder(&tmp);
+    let dir = tmp.path().join("copyk8");
+    std::fs::create_dir(&dir).unwrap();
+    let key = c.create(None, &dir).await.unwrap();
+    let team = key["team"].as_str().unwrap().to_owned();
+    // Two other people both called Founder ask to join through the founder's own authority.
+    let service: std::sync::Arc<Service> = c.authority.clone().unwrap();
+    let call = |who: &whatsai_core::crypto::Identity, op: serde_json::Value| {
+        service.handle(
+            who.sign(Request {
+                version: VERSION,
+                nonce: id(),
+                timestamp: now(),
+                operation: op,
+            })
+            .unwrap(),
+        )
+    };
+    let secret = c.membership(&team).unwrap().secret;
+    let twin = whatsai_core::crypto::Identity::generate("Founder");
+    let refused = call(&twin, json!({"method":"request_join","team":team,"member":twin.member().unwrap(),"secret":secret})).unwrap();
+    assert_eq!(refused["state"], "name-taken");
+    assert_eq!(refused["suggested"], "founder-2");
+    let mut renamed = twin.member().unwrap();
+    renamed.name = "Founder 2".into();
+    assert_eq!(
+        call(
+            &twin,
+            json!({"method":"request_join","team":team,"member":renamed,"secret":secret})
+        )
+        .unwrap()["state"],
+        "pending"
+    );
+    let third = whatsai_core::crypto::Identity::generate("founder-2");
+    let refused = call(&third, json!({"method":"request_join","team":team,"member":third.member().unwrap(),"secret":secret})).unwrap();
+    assert_eq!(
+        (refused["state"].as_str(), refused["suggested"].as_str()),
+        (Some("name-taken"), Some("founder-2-2")),
+        "pending names count as taken too"
+    );
+    // Naming a session changes how the team addresses it; the suggestion stays unique.
+    let codex = c.attach("codex", &dir, None, None, None).unwrap()["agent"]["label"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    c.publish(&codex, true).unwrap();
+    let info = c.agent(&codex).unwrap();
+    assert_eq!(info["suggested_handle"], "founder/codex");
+    let named = c.name_agent(&codex, "Reviewer Bot").unwrap();
+    assert_eq!(named["nick"], "reviewer-bot");
+    assert_eq!(named["suggested_handle"], "founder/reviewer-bot");
+    let mut t = c.team(&team).unwrap();
+    t.agents.insert(
+        c.identity.member().unwrap().id,
+        c.agent_presence(&team).unwrap(),
+    );
+    assert_eq!(participants(&t)[0].handle, "founder/reviewer-bot");
+    assert!(c.name_agent(&codex, &"x".repeat(33)).is_err());
+    assert_eq!(
+        c.name_agent(&codex, "").unwrap()["nick"],
+        serde_json::Value::Null,
+        "empty clears the name"
+    );
 }

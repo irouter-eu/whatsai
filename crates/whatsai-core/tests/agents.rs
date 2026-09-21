@@ -388,7 +388,7 @@ fn version_one_databases_upgrade_in_place() {
     let v: i64 =
         c.db.pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-    assert_eq!(v, 5);
+    assert_eq!(v, 6);
     assert!(
         c.config("worker").unwrap().is_none(),
         "single-worker binding is retired"

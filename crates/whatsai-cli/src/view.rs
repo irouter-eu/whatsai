@@ -83,69 +83,77 @@ pub fn teams(v: &Value) -> Vec<String> {
         &rows,
     )
 }
-/// Members and their published agents, from a `list` result.
-pub fn members(team: &Value) -> Vec<String> {
-    let admins: Vec<&str> = team["admins"]
-        .as_array()
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+/// Members and their published sessions, from a `list` result, named as the team addresses
+/// them: `alice`, then `alice/claude`, `alice/codex`.
+pub fn members(team_v: &Value) -> Vec<String> {
+    let team: Option<whatsai_core::protocol::Team> = serde_json::from_value(team_v.clone()).ok();
     let now = whatsai_core::protocol::now();
     let mut rows = vec![];
-    if let Some(members) = team["members"].as_object() {
-        let mut members: Vec<(&String, &Value)> = members.iter().collect();
-        members.sort_by_key(|(_, m)| s(m, "name").to_owned());
-        for (id, m) in members {
-            let role = if id.as_str() == s(team, "founder") {
+    if let Some(team) = &team {
+        let handles = whatsai_core::protocol::member_handles(team);
+        let participants = whatsai_core::protocol::participants(team);
+        let mut members: Vec<&whatsai_core::protocol::Member> = team.members.values().collect();
+        members.sort_by_key(|m| handles.get(&m.id).cloned().unwrap_or_default());
+        for m in members {
+            let role = if m.id == team.founder {
                 "founder, admin"
-            } else if admins.contains(&id.as_str()) {
+            } else if team.admins.contains(&m.id) {
                 "admin"
             } else {
                 "member"
             };
-            let seen = team["presence"][id].as_i64();
-            let state = match seen {
+            let state = match team.presence.get(&m.id) {
                 Some(t) if now - t < 15 => "online".to_owned(),
-                Some(t) => format!("seen {}", when(t)),
+                Some(t) => format!("seen {}", when(*t)),
                 None => "never seen".into(),
             };
             rows.push(vec![
-                s(m, "name").to_owned(),
+                handles
+                    .get(&m.id)
+                    .cloned()
+                    .unwrap_or_else(|| m.name.clone()),
                 role.into(),
                 state,
-                short(id),
-                String::new(),
+                short(&m.id),
+                m.name.clone(),
             ]);
-            if let Some(agents) = team["agents"][id].as_array() {
-                for a in agents {
-                    let online = if a["online"] == true {
-                        "online"
-                    } else {
-                        "offline"
-                    };
-                    rows.push(vec![
-                        format!("  {}", s(a, "label")),
-                        "agent".into(),
-                        online.into(),
-                        String::new(),
+            for p in participants.iter().filter(|p| p.member == m.id) {
+                let extra = team.agents[&m.id]
+                    .as_array()
+                    .and_then(|a| a.iter().find(|x| x["label"] == p.label))
+                    .map(|a| {
                         format!("{} {}", s(a, "workspace"), s(a, "repository"))
                             .trim()
-                            .to_owned(),
-                    ]);
-                }
+                            .to_owned()
+                    })
+                    .unwrap_or_default();
+                rows.push(vec![
+                    format!("  {}", p.handle),
+                    "session".into(),
+                    if p.online { "online" } else { "offline" }.into(),
+                    String::new(),
+                    extra,
+                ]);
             }
         }
     }
     let mut out = vec![format!(
         "Team {} ({}){}",
-        s(team, "workspace"),
-        short(s(team, "id")),
-        team["repository"]
+        s(team_v, "workspace"),
+        short(s(team_v, "id")),
+        team_v["repository"]
             .as_str()
             .map(|r| format!(" on {r}"))
             .unwrap_or_default()
     )];
     out.extend(table(
-        &["NAME", "ROLE", "STATE", "FINGERPRINT", "WORKSPACE"],
+        &[
+            "ADDRESS",
+            "ROLE",
+            "STATE",
+            "FINGERPRINT",
+            "NAME / WORKSPACE",
+        ],
         &rows,
     ));
     out
@@ -241,29 +249,41 @@ pub fn agents(v: &Value) -> Vec<String> {
         &rows,
     )
 }
-/// Inbox rows; `names` maps fingerprints to display names when known.
-pub fn inbox(v: &Value, names: &Value) -> Vec<String> {
+/// Inbox rows. `team` is the `list` result when known, so senders and recipients show as the
+/// team addresses them (`alice`, `alice/claude`); otherwise fingerprints and labels.
+pub fn inbox(v: &Value, team: &Value) -> Vec<String> {
+    let parsed: Option<whatsai_core::protocol::Team> = serde_json::from_value(team.clone()).ok();
+    let handles = parsed
+        .as_ref()
+        .map(whatsai_core::protocol::member_handles)
+        .unwrap_or_default();
+    let person = |id: &str| -> String {
+        handles
+            .get(id)
+            .cloned()
+            .or_else(|| team["members"][id]["name"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| short(id))
+    };
+    let session = |id: &str, label: &str| -> String {
+        parsed
+            .as_ref()
+            .and_then(|t| whatsai_core::protocol::handle_of(t, id, label))
+            .unwrap_or_else(|| format!("{}/{label}", person(id)))
+    };
     let rows: Vec<Vec<String>> = v
         .as_array()
         .map(|a| {
             a.iter()
                 .map(|m| {
                     let sender = s(m, "sender");
-                    let who = names[sender]["name"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| short(sender));
                     let from = match m["event"]["agent"].as_str() {
-                        Some(label) => format!("{who}/{label}"),
-                        None => who,
+                        Some(label) => session(sender, label),
+                        None => person(sender),
                     };
                     let to = match (m["event"]["to"].as_str(), m["event"]["to_agent"].as_str()) {
                         (None, _) => "everyone".to_owned(),
-                        (Some(_), Some(label)) => label.to_owned(),
-                        (Some(id), None) => names[id]["name"]
-                            .as_str()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| short(id)),
+                        (Some(id), Some(label)) => session(id, label),
+                        (Some(id), None) => person(id),
                     };
                     let text = match s(m, "kind") {
                         "message" => s(&m["event"], "text").to_owned(),
@@ -348,53 +368,114 @@ pub fn render(action: &str, result: &Value, extra: &Value) -> Option<Vec<String>
 mod tests {
     use super::*;
     use serde_json::json;
+    /// A team as `list` returns it, with a real create record so member handles derive.
+    fn fixture_team() -> Value {
+        use whatsai_core::{crypto::Identity, governance::replay, protocol::*};
+        let a = Identity::generate("aurelien");
+        let b = Identity::generate("bob");
+        let mut alice = a.member().unwrap();
+        alice.id = alice.id.clone();
+        let create = a
+            .sign(Governance {
+                team: "3e4d9441-b861-41f3-a393-16d8af812156".into(),
+                revision: 0,
+                previous: String::new(),
+                action: "create".into(),
+                member: Some(alice.clone()),
+                target: None,
+                repository: Some("https://x/y.git".into()),
+                workspace: Some("whatsai".into()),
+            })
+            .unwrap();
+        let previous = digest(&serde_json::to_vec(&create).unwrap());
+        let admit = a
+            .sign(Governance {
+                team: "3e4d9441-b861-41f3-a393-16d8af812156".into(),
+                revision: 1,
+                previous,
+                action: "admit".into(),
+                member: Some(b.member().unwrap()),
+                target: None,
+                repository: None,
+                workspace: None,
+            })
+            .unwrap();
+        let mut team = replay(&[create, admit], &alice.id).unwrap();
+        team.presence.insert(alice.id.clone(), now());
+        team.agents.insert(alice.id.clone(), json!([{"label":"claude@whatsai","harness":"claude","online":true,"workspace":"whatsai","repository":"https://x/y.git"}]));
+        let mut v = serde_json::to_value(&team).unwrap();
+        // The tests below name members by fixed ids; rewrite the generated ids to those.
+        let text = serde_json::to_string(&v)
+            .unwrap()
+            .replace(&alice.id, "aaaa1111bbbb")
+            .replace(&b.member().unwrap().id, "cccc2222dddd");
+        v = serde_json::from_str(&text).unwrap();
+        v
+    }
     #[test]
     fn tables_align_and_name_people_and_agents() {
-        let team = json!({
-            "id":"3e4d9441-b861-41f3-a393-16d8af812156","workspace":"whatsai","repository":"https://x/y.git",
-            "founder":"aaaa1111bbbb","admins":["aaaa1111bbbb"],
-            "members":{"aaaa1111bbbb":{"name":"aurelien"},"cccc2222dddd":{"name":"bob"}},
-            "presence":{"aaaa1111bbbb": whatsai_core::protocol::now()},
-            "agents":{"aaaa1111bbbb":[{"label":"claude@whatsai","online":true,"workspace":"whatsai","repository":"https://x/y.git"}]}
-        });
+        let team = fixture_team();
         let lines = members(&team);
         assert_eq!(lines[0], "Team whatsai (3e4d9441) on https://x/y.git");
-        assert!(lines[1].starts_with("NAME"));
+        assert!(lines[1].starts_with("ADDRESS"));
         assert!(
             lines[3].starts_with("aurelien")
                 && lines[3].contains("founder, admin")
-                && lines[3].contains("online")
+                && lines[3].contains("online"),
+            "{}",
+            lines[3]
         );
         assert!(
-            lines[4].starts_with("  claude@whatsai")
-                && lines[4].contains("agent")
-                && lines[4].contains("online")
+            lines[4].starts_with("  aurelien/claude")
+                && lines[4].contains("session")
+                && lines[4].contains("online"),
+            "{}",
+            lines[4]
         );
-        assert!(lines[5].starts_with("bob") && lines[5].contains("never seen"));
-        let widths: std::collections::HashSet<usize> = lines[1..]
+        assert!(
+            lines[5].starts_with("bob") && lines[5].contains("never seen"),
+            "{}",
+            lines[5]
+        );
+        let role_col: std::collections::HashSet<usize> = lines[1..]
             .iter()
-            .map(|l| l.find("ROLE").or(l.find("founder")).unwrap_or(0))
+            .filter_map(|l| {
+                l.find("ROLE")
+                    .or(l.find("founder,"))
+                    .or(l.find("session"))
+                    .or(l.find("member"))
+            })
             .collect();
-        assert!(widths.len() <= 3, "columns line up: {lines:?}");
+        assert_eq!(role_col.len(), 1, "columns line up: {lines:?}");
     }
     #[test]
     fn inbox_rows_describe_every_kind() {
-        let names = json!({"aaaa1111":{"name":"alice"}});
+        let team = fixture_team();
         let inbox_v = json!([
-            {"id":"e1","sender":"aaaa1111","kind":"message","created":whatsai_core::protocol::now()-30,"event":{"text":"hi\nthere","to":null,"agent":"codex@app"}},
-            {"id":"e2","sender":"zzzz","kind":"status","created":0,"event":{"text":"waiting","to":"aaaa1111","to_agent":"claude@app","data":{"state":"blocked"}}},
-            {"id":"e3","sender":"zzzz","kind":"file","created":0,"event":{"text":"Shared a file","data":{"name":"a.bin","size":12}}},
+            {"id":"e1","sender":"aaaa1111bbbb","kind":"message","created":whatsai_core::protocol::now()-30,"event":{"text":"hi\nthere","to":null,"agent":"claude@whatsai"}},
+            {"id":"e2","sender":"cccc2222dddd","kind":"status","created":0,"event":{"text":"waiting","to":"aaaa1111bbbb","to_agent":"claude@whatsai","data":{"state":"blocked"}}},
+            {"id":"e3","sender":"cccc2222dddd","kind":"file","created":0,"event":{"text":"Shared a file","data":{"name":"a.bin","size":12}}},
         ]);
-        let lines = inbox(&inbox_v, &names);
+        let parsed: Result<whatsai_core::protocol::Team, _> = serde_json::from_value(team.clone());
+        assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.err());
+        let lines = inbox(&inbox_v, &team);
         assert!(
-            lines[2].contains("alice/codex@app")
+            lines[2].contains("aurelien/claude")
                 && lines[2].contains("everyone")
-                && lines[2].contains("hi there")
+                && lines[2].contains("hi there"),
+            "{}",
+            lines[2]
         );
-        assert!(lines[3].contains("[status blocked] waiting") && lines[3].contains("claude@app"));
+        assert!(
+            lines[3].contains("bob")
+                && lines[3].contains("[status blocked] waiting")
+                && lines[3].contains("aurelien/claude"),
+            "{}",
+            lines[3]
+        );
         assert!(lines[4].contains("[file a.bin 12 bytes]"));
         assert_eq!(
-            inbox(&json!([]), &names),
+            inbox(&json!([]), &json!({})),
             vec!["Inbox is empty.".to_owned()]
         );
     }

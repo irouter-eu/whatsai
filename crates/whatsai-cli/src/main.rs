@@ -92,6 +92,9 @@ enum Command {
         /// The local directory that will work in this team.
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
+        /// Your name in this team, when your usual one is taken or you want another.
+        #[arg(long)]
+        name: Option<String>,
     },
     JoinStatus,
     Approve {
@@ -189,6 +192,11 @@ enum AgentCommand {
     },
     Show {
         agent: String,
+    },
+    /// Name this session in its team: PERSON/NAME instead of PERSON/harness. Empty clears it.
+    Name {
+        agent: String,
+        name: String,
     },
     /// Let the team see and address this agent. Nothing is published without this.
     Publish {
@@ -377,6 +385,9 @@ async fn main() -> anyhow::Result<()> {
             AgentCommand::Show { agent } => {
                 json!({"action":"agent","operation":"show","agent":agent})
             }
+            AgentCommand::Name { agent, name } => {
+                json!({"action":"agent","operation":"name","agent":agent,"name":name})
+            }
             AgentCommand::Publish { agent } => {
                 json!({"action":"agent","operation":"publish","agent":agent})
             }
@@ -487,8 +498,12 @@ async fn main() -> anyhow::Result<()> {
         } => {
             json!({"action":"create","repository":repository,"workspace":std::fs::canonicalize(workspace)?})
         }
-        Command::Join { key, workspace } => {
-            json!({"action":"join","key":key,"workspace":std::fs::canonicalize(workspace)?})
+        Command::Join {
+            key,
+            workspace,
+            name,
+        } => {
+            json!({"action":"join","key":key,"workspace":std::fs::canonicalize(workspace)?,"name":name})
         }
         Command::JoinStatus => json!({"action":"join-status"}),
         Command::Approve { member } => json!({"action":"approve","member":member}),

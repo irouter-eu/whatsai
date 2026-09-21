@@ -127,7 +127,7 @@ impl Client {
         let row = self
             .db
             .query_row(
-                "SELECT harness,workspace,repository,created,last_seen,retired,worker,cursor,(SELECT count(*) FROM sessions WHERE agent=label),published,enrolled,team FROM agents WHERE label=?",
+                "SELECT harness,workspace,repository,created,last_seen,retired,worker,cursor,(SELECT count(*) FROM sessions WHERE agent=label),published,enrolled,team,nick FROM agents WHERE label=?",
                 [label],
                 |r| {
                     Ok(json!({
@@ -144,6 +144,7 @@ impl Client {
                         "published":r.get::<_,i64>(9)?==1,
                         "enrolled":r.get::<_,i64>(10)?==1,
                         "team":r.get::<_,Option<String>>(11)?,
+                        "nick":r.get::<_,Option<String>>(12)?,
                     }))
                 },
             )
@@ -151,11 +152,34 @@ impl Client {
             .context("unknown agent")?;
         let mut row = row;
         row["online"] = json!(row["sessions"].as_i64().unwrap_or(0) > 0);
-        row["team_name"] = row["team"]
-            .as_str()
-            .and_then(|t| self.team(t).ok())
+        let team = row["team"].as_str().and_then(|t| self.team(t).ok());
+        row["team_name"] = team
+            .as_ref()
             .map(|t| json!(t.workspace))
             .unwrap_or(Value::Null);
+        // How the team addresses this agent once published, and what it would be called now.
+        if let Some(t) = team.as_ref()
+            && let Ok(me) = self.identity.member().map(|m| m.id)
+        {
+            let person = member_handles(t)
+                .get(&me)
+                .cloned()
+                .unwrap_or_else(|| slug(&self.identity.name));
+            let taken: Vec<String> = participants(t)
+                .into_iter()
+                .filter(|p| p.member == me && p.label != label)
+                .filter_map(|p| p.handle.split_once('/').map(|(_, a)| a.to_owned()))
+                .collect();
+            let base = row["nick"]
+                .as_str()
+                .map(slug)
+                .unwrap_or_else(|| row["harness"].as_str().unwrap_or("agent").to_owned());
+            let suggested = format!("{person}/{}", free_handle(&base, &taken));
+            row["handle"] = handle_of(t, &me, label)
+                .map(Value::String)
+                .unwrap_or(Value::Null);
+            row["suggested_handle"] = json!(suggested);
+        }
         Ok(row)
     }
     pub fn agents(&self) -> Result<Value> {
@@ -178,7 +202,7 @@ impl Client {
     pub fn agent_presence(&self, team: &str) -> Result<Value> {
         self.expire_sessions()?;
         let mut q = self.db.prepare(
-            "SELECT label,harness,workspace,repository,last_seen,(SELECT count(*) FROM sessions WHERE agent=label) FROM agents WHERE retired=0 AND published=1 AND enrolled=1 AND team=? ORDER BY label",
+            "SELECT label,harness,workspace,repository,last_seen,(SELECT count(*) FROM sessions WHERE agent=label),nick FROM agents WHERE retired=0 AND published=1 AND enrolled=1 AND team=? ORDER BY label",
         )?;
         let rows = q.query_map([team], |r| {
             Ok(json!({
@@ -188,6 +212,7 @@ impl Client {
                 "repository":r.get::<_,Option<String>>(3)?,
                 "last_seen":r.get::<_,i64>(4)?,
                 "online":r.get::<_,i64>(5)?>0,
+                "nick":r.get::<_,Option<String>>(6)?,
             }))
         })?;
         Ok(json!(rows.collect::<rusqlite::Result<Vec<_>>>()?))
@@ -210,6 +235,26 @@ impl Client {
                 [label],
             )?
         };
+        ensure!(n == 1, "unknown or retired agent");
+        self.agent(label)
+    }
+    /// Name a session in its team: `person/NAME` instead of `person/harness`. Empty clears it.
+    pub fn name_agent(&self, label: &str, nick: &str) -> Result<Value> {
+        valid_label(label)?;
+        let nick = nick.trim();
+        ensure!(nick.len() <= 32, "session names are at most 32 characters");
+        let value = if nick.is_empty() {
+            None
+        } else {
+            Some(slug(nick))
+        };
+        if let Some(v) = &value {
+            ensure!(v != "member", "that name is not usable");
+        }
+        let n = self.db.execute(
+            "UPDATE agents SET nick=? WHERE label=? AND retired=0",
+            params![value, label],
+        )?;
         ensure!(n == 1, "unknown or retired agent");
         self.agent(label)
     }
@@ -454,6 +499,7 @@ impl Client {
             ),
             "heartbeat" => self.heartbeat(field(cmd, "lease")?),
             "detach" => self.detach(field(cmd, "lease")?),
+            "name" => self.name_agent(&self.label_from(cmd)?, field(cmd, "name")?),
             "publish" => self.publish(&self.label_from(cmd)?, true),
             "unpublish" => self.publish(&self.label_from(cmd)?, false),
             "enroll" => self.enroll(&self.label_from(cmd)?, true, cmd["team"].as_str()),

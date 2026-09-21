@@ -90,6 +90,24 @@ impl Service {
             if team.members.contains_key(who) {
                 return Ok(json!({"state":"admitted","team":team}));
             }
+            // Names are how people address each other; a taken one is refused with a free one.
+            let mut taken: Vec<String> = member_handles(&team).into_values().collect();
+            let mut q = db.prepare(
+                "SELECT body FROM requests WHERE team=? AND member!=? AND state='pending' AND expires>?",
+            )?;
+            let pending = q.query_map(params![team_id, who, now()], |r| r.get::<_, String>(0))?;
+            for body in pending {
+                if let Ok(m) = serde_json::from_str::<Member>(&body?) {
+                    taken.push(slug(&m.name));
+                }
+            }
+            drop(q);
+            if taken.contains(&slug(&member.name)) {
+                let suggested = free_handle(&member.name, &taken);
+                return Ok(
+                    json!({"state":"name-taken","name":member.name,"suggested":suggested,"taken":taken}),
+                );
+            }
             let existing: Option<(String, i64)> = db
                 .query_row(
                     "SELECT state,expires FROM requests WHERE team=? AND member=?",

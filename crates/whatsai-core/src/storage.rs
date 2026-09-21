@@ -152,6 +152,7 @@ pub const CLIENT_MIGRATIONS: &[&str] = &[
     CLIENT_SCHEMA_V3,
     CLIENT_SCHEMA_V4,
     CLIENT_SCHEMA_V5,
+    CLIENT_SCHEMA_V6,
 ];
 const CLIENT_SCHEMA_V1: &str = r#"
 CREATE TABLE config(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -198,4 +199,8 @@ UPDATE inbox SET team=json_extract(envelope,'$.body.header.team');
 UPDATE agents SET team=(SELECT id FROM teams LIMIT 1) WHERE enrolled=1;
 UPDATE agents SET enrolled=0 WHERE team IS NULL;
 DELETE FROM config WHERE key IN ('team','authority','secret','cursor','joining','creation_intent','creation_secret');
+"#;
+/// A session can be named in its team: `aurelien/reviewer` rather than `aurelien/claude`.
+const CLIENT_SCHEMA_V6: &str = r#"
+ALTER TABLE agents ADD COLUMN nick TEXT;
 "#;

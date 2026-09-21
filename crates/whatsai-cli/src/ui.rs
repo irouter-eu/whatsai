@@ -169,7 +169,7 @@ impl App {
                     view::members(&self.team)
                 }
             }
-            Tab::Inbox => view::inbox(&self.inbox, &self.team["members"]),
+            Tab::Inbox => view::inbox(&self.inbox, &self.team),
             Tab::Requests => view::requests(&self.requests),
             Tab::Agents => view::agents(&self.agents),
             Tab::Outbox => {
@@ -265,7 +265,8 @@ impl App {
             }
             KeyCode::Char('s') if self.team_id().is_some() => {
                 self.input = Some(Input::Recipient(String::new()));
-                self.status = "to: name, agent label, NAME/LABEL, or empty for everyone".into();
+                self.status =
+                    "to: a person (bob), a session (bob/claude), or empty for everyone".into();
             }
             KeyCode::Char('i') if self.team_id().is_some() => {
                 match self.request(json!({"action":"invite"})) {
@@ -635,11 +636,43 @@ mod tests {
         app.identity = json!({"name":"aurelien","id":"7d7dc33e0000"});
         app.version = json!({"daemon":"0.8.0"});
         app.teams = vec![
-            json!({"id":"t1","workspace":"whatsai","role":"admin","members":2,"state":"member"}),
+            json!({"id":"11111111-2222-4333-8444-555555555555","workspace":"whatsai","role":"admin","members":2,"state":"member"}),
         ];
-        app.team = json!({"id":"t1","workspace":"whatsai","founder":"7d7dc33e0000","admins":["7d7dc33e0000"],
-            "members":{"7d7dc33e0000":{"name":"aurelien"},"bbbb":{"name":"bob"}},"presence":{},
-            "agents":{"7d7dc33e0000":[{"label":"codex@whatsai","online":true,"workspace":"whatsai"}]}});
+        app.team = {
+            use whatsai_core::{crypto::Identity, governance::replay, protocol::*};
+            let a = Identity::generate("aurelien");
+            let b = Identity::generate("bob");
+            let me = a.member().unwrap();
+            let create = a
+                .sign(Governance {
+                    team: "11111111-2222-4333-8444-555555555555".into(),
+                    revision: 0,
+                    previous: String::new(),
+                    action: "create".into(),
+                    member: Some(me.clone()),
+                    target: None,
+                    repository: None,
+                    workspace: Some("whatsai".into()),
+                })
+                .unwrap();
+            let previous = digest(&serde_json::to_vec(&create).unwrap());
+            let admit = a
+                .sign(Governance {
+                    team: "11111111-2222-4333-8444-555555555555".into(),
+                    revision: 1,
+                    previous,
+                    action: "admit".into(),
+                    member: Some(b.member().unwrap()),
+                    target: None,
+                    repository: None,
+                    workspace: None,
+                })
+                .unwrap();
+            let mut team =
+                replay(&[create, admit], &me.id).unwrap_or_else(|e| panic!("fixture: {e:#}"));
+            team.agents.insert(me.id.clone(), json!([{"label":"codex@whatsai","harness":"codex","online":true,"workspace":"whatsai"}]));
+            serde_json::to_value(&team).unwrap()
+        };
         app.requests = json!([{"member":{"name":"carol","id":"cccc"},"state":"pending","expires":whatsai_core::protocol::now()+3600}]);
         app.agents = json!([{"label":"claude@whatsai","team_name":"whatsai","published":false,"enrolled":true,"online":true,"sessions":1,"unread":{"addressed":2,"shared":0},"worker":null,"workspace":"/w","last_seen":0}]);
         app.status = "ready".into();
@@ -668,7 +701,10 @@ mod tests {
             s.contains("*whatsai (2)"),
             "team list marks admin role and member count"
         );
-        assert!(s.contains("founder, admin") && s.contains("codex@whatsai") && s.contains("bob"));
+        assert!(
+            s.contains("founder, admin") && s.contains("aurelien/codex") && s.contains("bob"),
+            "{s}"
+        );
         assert!(
             s.contains("Requests!"),
             "pending requests are flagged in the tab bar"

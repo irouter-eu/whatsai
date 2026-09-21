@@ -272,3 +272,122 @@ pub fn secret_matches(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
+
+/// A handle fragment: lowercase letters, digits and dashes, never empty.
+pub fn slug(name: &str) -> String {
+    let mut out = String::new();
+    let mut dash = false;
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            dash = false;
+        } else if !dash && !out.is_empty() {
+            out.push('-');
+            dash = true;
+        }
+    }
+    let out = out.trim_end_matches('-').to_owned();
+    if out.is_empty() { "member".into() } else { out }
+}
+/// Team-scoped names for people: the founder first, then members in admission order, each
+/// getting their slug or slug-2, slug-3 when taken. Every client derives the same table.
+pub fn member_handles(team: &Team) -> BTreeMap<String, String> {
+    let mut handles: BTreeMap<String, String> = BTreeMap::new();
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut order: Vec<&Member> = vec![];
+    for record in &team.history {
+        if let Some(m) = &record.body.member
+            && team.members.contains_key(&m.id)
+            && !order.iter().any(|o| o.id == m.id)
+        {
+            order.push(m);
+        }
+    }
+    for m in order {
+        let base = slug(&m.name);
+        let mut handle = base.clone();
+        let mut n = 1;
+        while !taken.insert(handle.clone()) {
+            n += 1;
+            handle = format!("{base}-{n}");
+        }
+        handles.insert(m.id.clone(), handle);
+    }
+    handles
+}
+/// One published agent as the team addresses it: `person/harness`, or `person/harness-2` when
+/// that person publishes several agents of one harness here. Derived from presence order, so
+/// the sender and every recipient agree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Participant {
+    pub handle: String,
+    pub member: String,
+    pub label: String,
+    pub harness: String,
+    pub online: bool,
+}
+pub fn participants(team: &Team) -> Vec<Participant> {
+    let people = member_handles(team);
+    let mut out = vec![];
+    for (member, person) in &people {
+        let Some(agents) = team.agents.get(member).and_then(|a| a.as_array()) else {
+            continue;
+        };
+        let mut agents: Vec<&Value> = agents.iter().collect();
+        agents.sort_by_key(|a| a["label"].as_str().unwrap_or("").to_owned());
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        for a in agents {
+            let label = a["label"].as_str().unwrap_or("").to_owned();
+            let harness = a["harness"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| label.split_once('@').map(|(h, _)| h.to_owned()))
+                .unwrap_or_else(|| "agent".into());
+            // A session may carry a name of its own; the harness is only the default.
+            let harness = a["nick"]
+                .as_str()
+                .map(slug)
+                .filter(|n| !n.is_empty())
+                .unwrap_or(harness);
+            let n = seen.entry(harness.clone()).or_insert(0);
+            *n += 1;
+            let handle = if *n == 1 {
+                format!("{person}/{harness}")
+            } else {
+                format!("{person}/{harness}-{n}")
+            };
+            out.push(Participant {
+                handle,
+                member: member.clone(),
+                label,
+                harness,
+                online: a["online"] == true,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.handle.cmp(&b.handle));
+    out
+}
+/// The first of `base`, `base-2`, `base-3`… not in `taken`.
+pub fn free_handle(base: &str, taken: &[String]) -> String {
+    let base = slug(base);
+    let mut n = 1;
+    loop {
+        let candidate = if n == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{n}")
+        };
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+/// The team handle of one of a member's published agents, by local label.
+pub fn handle_of(team: &Team, member: &str, label: &str) -> Option<String> {
+    participants(team)
+        .into_iter()
+        .find(|p| p.member == member && p.label == label)
+        .map(|p| p.handle)
+}

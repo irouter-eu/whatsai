@@ -84,14 +84,21 @@ def main():
    cli('bob','agent','publish',claude_label);cli('bob','agent','publish','codex@app');cli('bob','sync');cli('charlie','sync')
    published=cli('charlie','list')['agents'][bob];assert {a['label'] for a in published}=={'claude@app','codex@app'} and all('workspace' in a and '/' not in a['workspace'] for a in published)
    assert cli('charlie','send','wrong label','--to',bob,'--to-agent','claude@nowhere',check=False).returncode!=0
-   cli('charlie','send','for claude only','--to',claude_label);cli('charlie','send','for everyone');cli('charlie','send','by name','--to','bob');assert cli('charlie','send','nobody','--to','zed',check=False).returncode!=0;cli('charlie','sync');cli('bob','sync')
+   # Teammates address people by name and sessions as person/session; bare session names only when unique.
+   cli('charlie','send','for claude only','--to','bob/claude');cli('charlie','send','for everyone');cli('charlie','send','by name','--to','bob');assert cli('charlie','send','nobody','--to','zed',check=False).returncode!=0
+   assert cli('charlie','send','bare unique','--to','codex')['state']=='queued','only bob publishes codex here'
+   cli('bob','agent','name',claude_label,'Reviewer');cli('bob','sync');cli('charlie','sync')
+   assert any(a['nick']=='reviewer' for a in cli('charlie','list')['agents'][bob]),'a named session is published under its name'
+   assert cli('charlie','send','to the reviewer','--to','bob/reviewer')['state']=='queued'
+   assert cli('charlie','send','old name','--to','bob/claude',check=False).returncode!=0,'the old handle is gone once renamed'
+   cli('charlie','sync');cli('bob','sync')
    named=[x for x in cli('bob','inbox') if x['event']['text']=='by name'];assert named and named[0]['event']['to']==bob and named[0]['event'].get('to_agent') is None,'a name resolves to the member'
    claude_unread=cli('bob','agent','unread','--agent',claude_label);codex_unread=cli('bob','agent','unread','--agent','codex@app')
-   assert (claude_unread['addressed'],codex_unread['addressed'])==(1,0),(claude_unread,codex_unread)
-   assert claude_unread['shared']>=1
+   assert (claude_unread['addressed'],codex_unread['addressed'])==(2,1),(claude_unread,codex_unread)
+   assert claude_unread['shared']>=2
    assert all(x['event'].get('to_agent') in (None,claude_label) for x in cli('bob','inbox','--agent',claude_label))
    cli('bob','agent','mark-read',claude_label);assert cli('bob','agent','unread','--agent',claude_label)['addressed']==0
-   assert cli('bob','agent','unread','--agent','codex@app')['shared']>=1,'cursors are per agent'
+   assert cli('bob','agent','unread','--agent','codex@app')['shared']>=2,'cursors are per agent'
    cli('bob','status','--set','ready','--as',claude_label,'--description','Agent status');cli('bob','sync');cli('charlie','sync')
    assert any(x['member']==bob and x['agent']==claude_label for x in cli('charlie','status'))
    cli('bob','agent','detach',attached['lease']);cli('bob','agent','retire','codex@app');cli('bob','sync');cli('charlie','sync')
@@ -123,9 +130,14 @@ def main():
    assert len(cli('bob','teams'))==2
    assert cli('bob','send','ambiguous',check=False).returncode!=0,'two teams and an unbound directory need --team'
    charlie_notes=base/'charlie-notes';charlie_notes.mkdir()
-   assert cli('charlie','join',key2['join'],'--workspace',str(charlie_notes))['state']=='pending'
+   # A name already used in the team is refused with a free suggestion; the joiner picks one.
+   taken=cli('charlie','join',key2['join'],'--workspace',str(charlie_notes),'--name','bob',check=False)
+   assert taken.returncode!=0 and 'bob-2' in taken.stderr,taken.stderr
+   assert cli('charlie','join',key2['join'],'--workspace',str(charlie_notes),'--name','Charlie B')['state']=='pending'
    cli('bob','--team','bob-notes','approve',charlie);cli('charlie','sync')
    assert 'bob-notes' in [t['workspace'] for t in cli('charlie','teams')],'charlie is in the notes team'
+   notes_team=cli('bob','--team','bob-notes','list');assert any(m['name']=='Charlie B' for m in notes_team['members'].values()),'the chosen name is the one the team sees'
+   assert cli('bob','--team','bob-notes','send','hi','--to','charlie-b')['state']=='queued','and it is how charlie is addressed'
    cli('bob','sync');cli('bob','--team','bob-notes','send','notes only');cli('bob','--team','whatsai','send','repo only')
    cli('bob','sync');cli('charlie','sync')
    texts=[x['event']['text'] for x in cli('charlie','inbox')]

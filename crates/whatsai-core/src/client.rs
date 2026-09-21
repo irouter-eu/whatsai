@@ -22,37 +22,68 @@ use std::{
 /// id, state, envelope, error, team.
 type OutboxRow = (String, String, String, Option<String>, Option<String>);
 
-/// Turn a human address into a member fingerprint and, when it names an agent, its label.
-/// Accepts `NAME`, `LABEL`, or `NAME/LABEL`; names and labels must be unique in the team.
+/// Turn a human address into a member fingerprint and, when it names an agent, that agent's
+/// local label. Accepts a person (`alice`, a display name, or a fingerprint), a participant
+/// (`alice/claude`, `alice/claude-2`), a bare agent handle (`claude`) when exactly one
+/// participant in the team has it, or an agent's local label when unique.
 pub fn resolve_address(team: &Team, address: &str) -> Result<(String, Option<String>)> {
-    let (name, label) = match address.split_once('/') {
-        Some((n, l)) => (Some(n.trim()), Some(l.trim())),
-        None if address.contains('@') => (None, Some(address.trim())),
-        None => (Some(address.trim()), None),
+    let address = address.trim();
+    let people = member_handles(team);
+    let all = participants(team);
+    let find_person = |who: &str| -> Vec<String> {
+        let who_slug = slug(who);
+        team.members
+            .values()
+            .filter(|m| {
+                m.id == who || m.name == who || people.get(&m.id).is_some_and(|h| *h == who_slug)
+            })
+            .map(|m| m.id.clone())
+            .collect()
     };
-    let mut candidates: Vec<&Member> = team.members.values().collect();
-    if let Some(name) = name {
-        candidates.retain(|m| m.name == name || m.id == name);
-        ensure!(!candidates.is_empty(), "no member named {name:?}");
-    }
-    if let Some(label) = label {
-        valid_label(label)?;
-        candidates.retain(|m| {
-            team.agents
-                .get(&m.id)
-                .and_then(|a| a.as_array())
-                .is_some_and(|a| a.iter().any(|x| x["label"] == label))
-        });
+    if let Some((person, agent)) = address.split_once('/') {
+        let members = find_person(person.trim());
+        ensure!(!members.is_empty(), "no member named {person:?}");
         ensure!(
-            !candidates.is_empty(),
-            "no member has published an agent {label:?}; list shows what is published"
+            members.len() == 1,
+            "{person:?} matches several members; use a fingerprint"
         );
+        let wanted = format!("{}/{}", people[&members[0]], slug(agent.trim()));
+        let hit = all
+            .iter()
+            .find(|p| p.member == members[0] && (p.handle == wanted || p.label == agent.trim()))
+            .with_context(|| {
+                format!("{person} has not published {agent:?}; list shows their participants")
+            })?;
+        return Ok((hit.member.clone(), Some(hit.label.clone())));
+    }
+    let members = find_person(address);
+    if members.len() == 1 {
+        return Ok((members[0].clone(), None));
     }
     ensure!(
-        candidates.len() == 1,
-        "{address:?} matches several members; qualify it as NAME/LABEL or use a fingerprint"
+        members.is_empty(),
+        "{address:?} matches several members; use PERSON/AGENT or a fingerprint"
     );
-    Ok((candidates[0].id.clone(), label.map(str::to_owned)))
+    let wanted = slug(address);
+    let hits: Vec<&Participant> = all
+        .iter()
+        .filter(|p| {
+            p.handle.rsplit_once('/').is_some_and(|(_, a)| a == wanted) || p.label == address
+        })
+        .collect();
+    match hits.len() {
+        1 => Ok((hits[0].member.clone(), Some(hits[0].label.clone()))),
+        0 => {
+            bail!("nobody in this team is called {address:?}; list shows members and participants")
+        }
+        _ => bail!(
+            "{address:?} could be {}; say which",
+            hits.iter()
+                .map(|p| p.handle.as_str())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        ),
+    }
 }
 pub struct Client {
     pub dir: PathBuf,
@@ -472,8 +503,9 @@ impl Client {
             "notice":if relay {"This key requests admission; an admin must approve your fingerprint."} else {"No relay connection yet: this key only reaches the founder on the local network. Re-run invite once the daemon is online."}
         }))
     }
-    /// Ask a network's authority for admission using a join key, for the given local workspace.
-    pub async fn join(&self, key: &str, workspace: &Path) -> Result<Value> {
+    /// Ask a network's authority for admission using a join key, for the given local workspace,
+    /// optionally under a name chosen for that team.
+    pub async fn join(&self, key: &str, workspace: &Path, name: Option<&str>) -> Result<Value> {
         let card: Invite = serde_json::from_slice(
             &B64.decode(key.strip_prefix("whatsai1.").context("invalid join key")?)?,
         )?;
@@ -506,12 +538,27 @@ impl Client {
             "INSERT INTO joining(id,invite,path,requested) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET invite=excluded.invite,path=COALESCE(excluded.path,joining.path)",
             params![card.team, serde_json::to_string(&card)?, path, now()],
         )?;
+        let mut member = self.identity.member()?;
+        if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+            member.name = name.to_owned();
+            validate_member(&member)?;
+        }
         let mut result = self
             .rpc_at(
                 &authority,
-                json!({"method":"request_join","team":card.team,"member":self.identity.member()?,"secret":card.secret}),
+                json!({"method":"request_join","team":card.team,"member":member,"secret":card.secret}),
             )
             .await?;
+        if result["state"] == "name-taken" {
+            self.db
+                .execute("DELETE FROM joining WHERE id=?", [&card.team])?;
+            bail!(
+                "the name {:?} is already used in {}; join again with --name, for example {:?}",
+                result["name"].as_str().unwrap_or(""),
+                card.workspace,
+                result["suggested"].as_str().unwrap_or("")
+            );
+        }
         result["team"] = json!(card.team);
         result["workspace"] = json!(card.workspace);
         if result["state"] == "admitted" {
@@ -1248,6 +1295,7 @@ impl Client {
                             .or(cmd["descriptor"].as_str())
                             .context("missing key")?,
                         Path::new(workspace),
+                        cmd["name"].as_str(),
                     )
                     .await?;
                 // The session that brought the key in is part of the team it named, visibly.

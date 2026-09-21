@@ -1,6 +1,6 @@
 import {local} from './local.js';
 
-export interface Attached {label?:string;lease?:string;published?:boolean;enrolled?:boolean;team?:string;harness:string;workspace:string;}
+export interface Attached {label?:string;lease?:string;published?:boolean;enrolled?:boolean;team?:string;handle?:string;suggested?:string;harness:string;workspace:string;}
 
 /**
  * Every call a session makes carries `via`: its agent label, or "unattached" when the daemon
@@ -37,7 +37,7 @@ export async function attachAgent(opts:{binary?:string;cwd?:string;heartbeatMs?:
   console.error(`whatsai-mcp: not attached as an agent (${e instanceof Error?e.message:String(e)})`);
   return attached;
  }
- attached.label=result?.agent?.label;attached.lease=result?.lease;attached.published=result?.agent?.published===true;attached.enrolled=result?.agent?.enrolled===true;attached.team=result?.agent?.team_name??undefined;
+ attached.label=result?.agent?.label;attached.lease=result?.lease;attached.published=result?.agent?.published===true;attached.enrolled=result?.agent?.enrolled===true;attached.team=result?.agent?.team_name??undefined;attached.handle=result?.agent?.handle??undefined;attached.suggested=result?.agent?.suggested_handle??undefined;
  if(!attached.lease)return attached;
  const lease=attached.lease;
  const timer=setInterval(()=>{local({action:'agent',operation:'heartbeat',lease},opts.binary).catch(()=>{});},opts.heartbeatMs??15_000);
