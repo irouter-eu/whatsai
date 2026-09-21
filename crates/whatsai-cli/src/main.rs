@@ -1,8 +1,8 @@
 mod ui;
-mod view;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use whatsai_core::view;
 #[derive(Parser)]
 #[command(version, about = "Private teamwork for people and their coding agents")]
 struct Args {
@@ -573,29 +573,13 @@ async fn main() -> anyhow::Result<()> {
     if let Ok(cwd) = std::env::current_dir() {
         command["cwd"] = json!(cwd);
     }
-    let action = command["action"].as_str().unwrap_or("").to_owned();
-    let result = whatsai_core::daemon::request(&state, command.clone()).await?;
     if args.table {
-        // Inbox rows name senders and sessions as the team does when the roster is at hand.
-        let names = if matches!(action.as_str(), "inbox" | "files") {
-            let mut list = json!({"action":"list"});
-            for key in ["team", "cwd"] {
-                if !command[key].is_null() {
-                    list[key] = command[key].clone();
-                }
-            }
-            whatsai_core::daemon::request(&state, list)
-                .await
-                .unwrap_or(json!({}))
-        } else {
-            json!({})
-        };
-        match view::render(&action, &result, &names) {
-            Some(lines) => println!("{}", lines.join("\n")),
-            None => println!("{}", serde_json::to_string_pretty(&result)?),
-        }
-    } else {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        command["table"] = json!(true);
+    }
+    let result = whatsai_core::daemon::request(&state, command).await?;
+    match result["table"].as_str() {
+        Some(table) if args.table => println!("{table}"),
+        _ => println!("{}", serde_json::to_string_pretty(&result)?),
     }
     Ok(())
 }

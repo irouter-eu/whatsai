@@ -8,4 +8,5 @@ pub mod repository;
 pub mod service;
 pub mod storage;
 pub mod transport;
+pub mod view;
 pub mod worker;

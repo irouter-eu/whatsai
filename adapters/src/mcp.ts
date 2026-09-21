@@ -5,11 +5,13 @@ import {z} from 'zod';
 import {local} from './local.js';
 import {attachAgent,stamp} from './agent.js';
 
-const ADAPTER_VERSION='0.9.2';
+const ADAPTER_VERSION='0.9.3';
 const actions=['version','register','health','teams','create','invite','join','join-status','list','requests','approve','reject','promote','demote','revoke','leave','inbox','unread','mark-read','publish','unpublish','enroll','unenroll','name','outbox','sync','agent-send','files','share','download','status','handoff','agents'] as const;
 // Actions where the calling session's agent label is the sender or the subject.
 const asAgent=new Set(['agent-send','status','share','handoff','inbox','unread','mark-read','publish','unpublish','enroll','unenroll','name']);
 const agentOps=new Set(['unread','mark-read','publish','unpublish','enroll','unenroll','name']);
+// Read actions come back as the daemon's own table, so every harness shows identical rows.
+const tabular=new Set(['list','teams','agents','inbox','files','requests']);
 
 let session=await attachAgent();
 const server=new McpServer({name:'whatsai',version:ADAPTER_VERSION});
@@ -27,7 +29,11 @@ server.tool('whatsai',`Operate the local WhatsAI team daemon. ${identity} Remote
   if(asAgent.has(action) && session.label && command.agent===undefined)command.agent=session.label;
   if(agentOps.has(action)){command.action='agent';command.operation=action;}
   else command.action=action;
+  if(tabular.has(action))command.table=true;
   const result=await local(command);
+  if(tabular.has(action) && result && typeof (result as any).table==='string'){
+   return {content:[{type:'text',text:(result as any).table}]};
+  }
   if(action==='version'){
    const daemon=result as Record<string,unknown>;
    const out={adapter:ADAPTER_VERSION,plugin:process.env.WHATSAI_PLUGIN_VERSION??'unknown',...daemon,agent:session.label??null,mismatch:daemon.daemon!==ADAPTER_VERSION};

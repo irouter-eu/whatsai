@@ -1,5 +1,5 @@
-//! Deterministic text views of daemon results: one table per command, the same rows in the
-//! terminal client, in `--table` output, and in the slash commands. No model in the loop.
+//! Deterministic text views of daemon results: one table per command, rendered by the daemon
+//! itself so the terminal client, `--table` output, and every harness show the same rows.
 use serde_json::Value;
 
 pub fn short(id: &str) -> String {
@@ -9,7 +9,7 @@ fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or("")
 }
 fn when(ts: i64) -> String {
-    let age = whatsai_core::protocol::now() - ts;
+    let age = crate::protocol::now() - ts;
     match age {
         a if a < 0 => "now".into(),
         a if a < 60 => format!("{a}s ago"),
@@ -87,13 +87,13 @@ pub fn teams(v: &Value) -> Vec<String> {
 /// addresses it (`alice/claude`), carrying its person's role and fingerprint. A member with no
 /// published session gets a single row under their name so admins can still act on them.
 pub fn members(team_v: &Value) -> Vec<String> {
-    let team: Option<whatsai_core::protocol::Team> = serde_json::from_value(team_v.clone()).ok();
-    let now = whatsai_core::protocol::now();
+    let team: Option<crate::protocol::Team> = serde_json::from_value(team_v.clone()).ok();
+    let now = crate::protocol::now();
     let mut rows = vec![];
     if let Some(team) = &team {
-        let handles = whatsai_core::protocol::member_handles(team);
-        let participants = whatsai_core::protocol::participants(team);
-        let mut members: Vec<&whatsai_core::protocol::Member> = team.members.values().collect();
+        let handles = crate::protocol::member_handles(team);
+        let participants = crate::protocol::participants(team);
+        let mut members: Vec<&crate::protocol::Member> = team.members.values().collect();
         members.sort_by_key(|m| handles.get(&m.id).cloned().unwrap_or_default());
         for m in members {
             let role = if m.id == team.founder {
@@ -103,7 +103,7 @@ pub fn members(team_v: &Value) -> Vec<String> {
             } else {
                 "member"
             };
-            let mine: Vec<&whatsai_core::protocol::Participant> =
+            let mine: Vec<&crate::protocol::Participant> =
                 participants.iter().filter(|p| p.member == m.id).collect();
             if mine.is_empty() {
                 let state = match team.presence.get(&m.id) {
@@ -173,7 +173,7 @@ pub fn requests(v: &Value) -> Vec<String> {
                             .map(|t| {
                                 format!(
                                     "expires in {}",
-                                    when(2 * whatsai_core::protocol::now() - t).replace(" ago", "")
+                                    when(2 * crate::protocol::now() - t).replace(" ago", "")
                                 )
                             })
                             .unwrap_or_default(),
@@ -252,10 +252,10 @@ pub fn agents(v: &Value) -> Vec<String> {
 /// Inbox rows. `team` is the `list` result when known, so senders and recipients show as the
 /// team addresses them (`alice`, `alice/claude`); otherwise fingerprints and labels.
 pub fn inbox(v: &Value, team: &Value) -> Vec<String> {
-    let parsed: Option<whatsai_core::protocol::Team> = serde_json::from_value(team.clone()).ok();
+    let parsed: Option<crate::protocol::Team> = serde_json::from_value(team.clone()).ok();
     let handles = parsed
         .as_ref()
-        .map(whatsai_core::protocol::member_handles)
+        .map(crate::protocol::member_handles)
         .unwrap_or_default();
     let person = |id: &str| -> String {
         handles
@@ -267,7 +267,7 @@ pub fn inbox(v: &Value, team: &Value) -> Vec<String> {
     let session = |id: &str, label: &str| -> String {
         parsed
             .as_ref()
-            .and_then(|t| whatsai_core::protocol::handle_of(t, id, label))
+            .and_then(|t| crate::protocol::handle_of(t, id, label))
             .unwrap_or_else(|| format!("{}/{label}", person(id)))
     };
     let rows: Vec<Vec<String>> = v
@@ -370,7 +370,7 @@ mod tests {
     use serde_json::json;
     /// A team as `list` returns it, with a real create record so member handles derive.
     fn fixture_team() -> Value {
-        use whatsai_core::{crypto::Identity, governance::replay, protocol::*};
+        use crate::{crypto::Identity, governance::replay, protocol::*};
         let a = Identity::generate("aurelien");
         let b = Identity::generate("bob");
         let mut alice = a.member().unwrap();
@@ -439,11 +439,11 @@ mod tests {
     fn inbox_rows_describe_every_kind() {
         let team = fixture_team();
         let inbox_v = json!([
-            {"id":"e1","sender":"aaaa1111bbbb","kind":"message","created":whatsai_core::protocol::now()-30,"event":{"text":"hi\nthere","to":null,"agent":"claude@whatsai"}},
+            {"id":"e1","sender":"aaaa1111bbbb","kind":"message","created":crate::protocol::now()-30,"event":{"text":"hi\nthere","to":null,"agent":"claude@whatsai"}},
             {"id":"e2","sender":"cccc2222dddd","kind":"status","created":0,"event":{"text":"waiting","to":"aaaa1111bbbb","to_agent":"claude@whatsai","data":{"state":"blocked"}}},
             {"id":"e3","sender":"cccc2222dddd","kind":"file","created":0,"event":{"text":"Shared a file","data":{"name":"a.bin","size":12}}},
         ]);
-        let parsed: Result<whatsai_core::protocol::Team, _> = serde_json::from_value(team.clone());
+        let parsed: Result<crate::protocol::Team, _> = serde_json::from_value(team.clone());
         assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.err());
         let lines = inbox(&inbox_v, &team);
         assert!(

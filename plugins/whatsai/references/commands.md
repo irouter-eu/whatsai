@@ -1,6 +1,6 @@
 # WhatsAI MCP arguments
 
-Read-only skills (list, teams, agents, inbox, requests, files, status, version) fetch their data with the CLI before the model sees them, so their output is fixed; the tool is for actions. The terminal client `whatsai ui` covers everything below without a model.
+Read actions (list, teams, agents, inbox, files, requests) return the daemon's own finished table as text, identical in every harness and in `whatsai ... --table`; show it as it is. Claude's read-only skills additionally fetch it with the CLI before the model runs. The tool's other actions are for changes. The terminal client `whatsai ui` covers everything below without a model.
 
 Call the `whatsai` tool with `action` and an `args` object. The adapter supplies `actor: agent` and, for agent-scoped actions, `agent`: this session's label (`harness@workspace`). Do not paste join keys or local secrets into team messages.
 

@@ -22,19 +22,19 @@ test('MCP reaches the real daemon and cannot override its declared action', {ski
   const result=await client.callTool({name:'whatsai',arguments:{action:'health',args:{action:'revoke'}}});
   assert.ok(!result.isError);const body=JSON.parse((result.content as any[])[0].text);assert.equal(body.member.name,'MCP fixture');
   const agents=await client.callTool({name:'whatsai',arguments:{action:'agents'}});
-  const list=JSON.parse((agents.content as any[])[0].text);
-  assert.equal(list.length,1);assert.equal(list[0].harness,'testharness');assert.equal(list[0].online,true);assert.equal(list[0].sessions,1);
-  assert.equal(list[0].published,false,'attaching publishes nothing');
+  const table=(agents.content as any[])[0].text as string;
+  assert.match(table,/^AGENT\s+TEAM\s+VISIBILITY/,'read actions return the daemon table, not JSON');
+  assert.match(table,/testharness@\S+\s+-\s+private\s+online x1/,'the session shows as private and online');
   const published=await client.callTool({name:'whatsai',arguments:{action:'publish'}});
   assert.ok(published.isError,'publishing needs a team to enroll into');
   assert.match((published.content as any[])[0].text,/not a member of a team yet|say which team/);
   const version=await client.callTool({name:'whatsai',arguments:{action:'version'}});
   const v=JSON.parse((version.content as any[])[0].text);
-  assert.equal(v.adapter,'0.9.2');assert.equal(v.plugin,'test-plugin');assert.match(v.daemon,/^\d+\.\d+\.\d+$/);assert.equal(typeof v.database,'number');assert.equal(v.mismatch,v.daemon!=='0.9.2');
+  assert.equal(v.adapter,'0.9.3');assert.equal(v.plugin,'test-plugin');assert.match(v.daemon,/^\d+\.\d+\.\d+$/);assert.equal(typeof v.database,'number');assert.equal(v.mismatch,v.daemon!=='0.9.3');
   const teams=await client.callTool({name:'whatsai',arguments:{action:'teams'}});
-  assert.deepEqual(JSON.parse((teams.content as any[])[0].text),[],'no teams yet');
+  assert.match((teams.content as any[])[0].text,/^No teams\./,'an empty table still reads as a sentence');
   const unread=await client.callTool({name:'whatsai',arguments:{action:'unread'}});
-  const counts=JSON.parse((unread.content as any[])[0].text);assert.equal(counts.agent,list[0].label);assert.equal(counts.addressed,0);
+  const counts=JSON.parse((unread.content as any[])[0].text);assert.match(counts.agent,/^testharness@/);assert.equal(counts.addressed,0);
  }finally{
   await client.close();daemon.kill('SIGTERM');await new Promise<void>(resolve=>{if(daemon.exitCode!==null)return resolve();daemon.once('exit',()=>resolve());});rmSync(dir,{recursive:true,force:true});
  }

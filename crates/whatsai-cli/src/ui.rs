@@ -1,6 +1,5 @@
 //! `whatsai ui`: a terminal client that talks to the daemon directly. Every key does one fixed
 //! thing, every screen is a fixed table, and it refreshes on its own. No model in the loop.
-use crate::view;
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -20,6 +19,7 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+use whatsai_core::view;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {

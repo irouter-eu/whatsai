@@ -65,7 +65,7 @@ The founder's daemon is the team's authority in this first implementation: it ap
 
 `whatsai ui` is a terminal client that talks to the daemon directly: teams on the left, tabs for members and their agents, inbox, join requests, your agents, and outbox on the right, refreshed every two seconds. Every key does one fixed thing: `←/→` switch team, `Tab` switch tab, `↑/↓` pick a row, `r` sync, `s` send (recipient, then text), `i` show the join key, `a`/`x` approve or reject the selected request, `p` publish or unpublish the selected agent, `e` enroll or unenroll it, `m` mark it read, `Enter` open a message, `q` quit. Run it in its own pane next to your coding agent; no model is involved.
 
-Every read command also prints a fixed table with `--table` (`whatsai list --table`, `teams`, `agents`, `inbox`, `requests`, `files`, `version`), and the plugin's read-only skills run those commands before the model sees anything, so `/whatsai:list` shows the daemon's answer rather than the model's interpretation of it. The MCP tool remains for actions.
+The daemon renders those tables itself, so the MCP tool returns the same rows to Codex and Claude alike. Every read command also prints a fixed table with `--table` (`whatsai list --table`, `teams`, `agents`, `inbox`, `requests`, `files`, `version`), and the plugin's read-only skills run those commands before the model sees anything, so `/whatsai:list` shows the daemon's answer rather than the model's interpretation of it. The MCP tool remains for actions.
 
 ## Chat, files, and code handoffs
 

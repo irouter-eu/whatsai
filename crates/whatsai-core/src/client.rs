@@ -1203,7 +1203,47 @@ impl Client {
         "accept-handoff",
         "worker",
     ];
+    /// Run a command and, when `table` is set, return `{table, data}` with the daemon's own
+    /// rendering, so every client shows identical rows.
     pub async fn command(&mut self, cmd: Value) -> Result<Value> {
+        let wants_table = cmd["table"] == true;
+        let action = field(&cmd, "action")?.to_owned();
+        let result = self.dispatch(cmd.clone()).await?;
+        if !wants_table {
+            return Ok(result);
+        }
+        let team_for_rows = match action.as_str() {
+            "inbox" | "files" => {
+                let scope = match (
+                    cmd["team"].as_str(),
+                    cmd["agent"].as_str(),
+                    cmd["harness"].as_str(),
+                    cmd["cwd"].as_str(),
+                ) {
+                    (Some(s), _, _, _) => self.find_team(s).ok(),
+                    (None, Some(label), _, _) => self.is_enrolled(label).ok().flatten(),
+                    (None, None, Some(h), Some(cwd)) => self
+                        .resolve_agent(h, Path::new(cwd))
+                        .ok()
+                        .flatten()
+                        .and_then(|l| self.is_enrolled(&l).ok().flatten()),
+                    _ => self.resolve_team(&cmd).ok(),
+                };
+                scope
+                    .and_then(|t| self.team(&t).ok())
+                    .map(|t| serde_json::to_value(t).unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null)
+            }
+            _ => Value::Null,
+        };
+        Ok(
+            match crate::view::render(&action, &result, &team_for_rows) {
+                Some(lines) => json!({"table":lines.join("\n"),"data":result}),
+                None => result,
+            },
+        )
+    }
+    async fn dispatch(&mut self, cmd: Value) -> Result<Value> {
         let action = field(&cmd, "action")?;
         if Self::TEAM_ACTIONS.contains(&action)
             && let Some(via) = cmd["via"].as_str()
