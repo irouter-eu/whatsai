@@ -83,8 +83,9 @@ pub fn teams(v: &Value) -> Vec<String> {
         &rows,
     )
 }
-/// Members and their published sessions, from a `list` result, named as the team addresses
-/// them: `alice`, then `alice/claude`, `alice/codex`.
+/// The team as a flat list of participants: one row per published session, named as the team
+/// addresses it (`alice/claude`), carrying its person's role and fingerprint. A member with no
+/// published session gets a single row under their name so admins can still act on them.
 pub fn members(team_v: &Value) -> Vec<String> {
     let team: Option<whatsai_core::protocol::Team> = serde_json::from_value(team_v.clone()).ok();
     let now = whatsai_core::protocol::now();
@@ -102,22 +103,27 @@ pub fn members(team_v: &Value) -> Vec<String> {
             } else {
                 "member"
             };
-            let state = match team.presence.get(&m.id) {
-                Some(t) if now - t < 15 => "online".to_owned(),
-                Some(t) => format!("seen {}", when(*t)),
-                None => "never seen".into(),
-            };
-            rows.push(vec![
-                handles
-                    .get(&m.id)
-                    .cloned()
-                    .unwrap_or_else(|| m.name.clone()),
-                role.into(),
-                state,
-                short(&m.id),
-                m.name.clone(),
-            ]);
-            for p in participants.iter().filter(|p| p.member == m.id) {
+            let mine: Vec<&whatsai_core::protocol::Participant> =
+                participants.iter().filter(|p| p.member == m.id).collect();
+            if mine.is_empty() {
+                let state = match team.presence.get(&m.id) {
+                    Some(t) if now - t < 15 => "online, no sessions".to_owned(),
+                    Some(t) => format!("seen {}, no sessions", when(*t)),
+                    None => "never seen".into(),
+                };
+                rows.push(vec![
+                    handles
+                        .get(&m.id)
+                        .cloned()
+                        .unwrap_or_else(|| m.name.clone()),
+                    role.into(),
+                    state,
+                    short(&m.id),
+                    String::new(),
+                ]);
+                continue;
+            }
+            for p in mine {
                 let extra = team.agents[&m.id]
                     .as_array()
                     .and_then(|a| a.iter().find(|x| x["label"] == p.label))
@@ -128,10 +134,10 @@ pub fn members(team_v: &Value) -> Vec<String> {
                     })
                     .unwrap_or_default();
                 rows.push(vec![
-                    format!("  {}", p.handle),
-                    "session".into(),
+                    p.handle.clone(),
+                    role.into(),
                     if p.online { "online" } else { "offline" }.into(),
-                    String::new(),
+                    short(&m.id),
                     extra,
                 ]);
             }
@@ -147,13 +153,7 @@ pub fn members(team_v: &Value) -> Vec<String> {
             .unwrap_or_default()
     )];
     out.extend(table(
-        &[
-            "ADDRESS",
-            "ROLE",
-            "STATE",
-            "FINGERPRINT",
-            "NAME / WORKSPACE",
-        ],
+        &["ADDRESS", "ROLE", "STATE", "FINGERPRINT", "WORKSPACE"],
         &rows,
     ));
     out
@@ -413,40 +413,27 @@ mod tests {
         v
     }
     #[test]
-    fn tables_align_and_name_people_and_agents() {
+    fn tables_are_flat_participants() {
         let team = fixture_team();
         let lines = members(&team);
         assert_eq!(lines[0], "Team whatsai (3e4d9441) on https://x/y.git");
         assert!(lines[1].starts_with("ADDRESS"));
         assert!(
-            lines[3].starts_with("aurelien")
+            lines[3].starts_with("aurelien/claude")
                 && lines[3].contains("founder, admin")
-                && lines[3].contains("online"),
+                && lines[3].contains("online")
+                && lines[3].contains("aaaa1111"),
             "{}",
             lines[3]
         );
         assert!(
-            lines[4].starts_with("  aurelien/claude")
-                && lines[4].contains("session")
-                && lines[4].contains("online"),
-            "{}",
+            lines[4].starts_with("bob")
+                && lines[4].contains("member")
+                && lines[4].contains("never seen"),
+            "a member with no sessions keeps one row: {}",
             lines[4]
         );
-        assert!(
-            lines[5].starts_with("bob") && lines[5].contains("never seen"),
-            "{}",
-            lines[5]
-        );
-        let role_col: std::collections::HashSet<usize> = lines[1..]
-            .iter()
-            .filter_map(|l| {
-                l.find("ROLE")
-                    .or(l.find("founder,"))
-                    .or(l.find("session"))
-                    .or(l.find("member"))
-            })
-            .collect();
-        assert_eq!(role_col.len(), 1, "columns line up: {lines:?}");
+        assert_eq!(lines.len(), 5, "no person rows above sessions: {lines:?}");
     }
     #[test]
     fn inbox_rows_describe_every_kind() {
