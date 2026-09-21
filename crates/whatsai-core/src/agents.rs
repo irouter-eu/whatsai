@@ -380,11 +380,13 @@ impl Client {
                 .db
                 .query_row(sql, params![cursor, me, label, team], |r| r.get(0))?)
         };
+        // Own messages count when another of our agents wrote them: that is how Codex asks
+        // Claude on the same machine. Only what this agent wrote itself is skipped.
         let addressed = count(
-            "SELECT count(*) FROM inbox WHERE seq>?1 AND team=?4 AND json_extract(envelope,'$.signer')!=?2 AND json_extract(event,'$.to')=?2 AND json_extract(event,'$.to_agent')=?3",
+            "SELECT count(*) FROM inbox WHERE seq>?1 AND team=?4 AND NOT (json_extract(envelope,'$.signer')=?2 AND COALESCE(json_extract(event,'$.agent'),?3)=?3) AND json_extract(event,'$.to')=?2 AND json_extract(event,'$.to_agent')=?3",
         )?;
         let shared = count(
-            "SELECT count(*) FROM inbox WHERE seq>?1 AND team=?4 AND json_extract(envelope,'$.signer')!=?2 AND json_extract(event,'$.to_agent') IS NULL AND (json_extract(event,'$.to') IS NULL OR json_extract(event,'$.to')=?2) AND ?3=?3",
+            "SELECT count(*) FROM inbox WHERE seq>?1 AND team=?4 AND NOT (json_extract(envelope,'$.signer')=?2 AND COALESCE(json_extract(event,'$.agent'),?3)=?3) AND json_extract(event,'$.to_agent') IS NULL AND (json_extract(event,'$.to') IS NULL OR json_extract(event,'$.to')=?2)",
         )?;
         Ok(
             json!({"agent":label,"addressed":addressed,"shared":shared,"cursor":cursor,"enrolled":true,"team":team}),

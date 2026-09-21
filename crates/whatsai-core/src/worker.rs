@@ -158,7 +158,9 @@ impl Client {
             };
             let event: Event = serde_json::from_str(&text)?;
             let env: Signed<Sealed> = serde_json::from_str(&envelope)?;
-            if env.signer == me
+            let from_self =
+                env.signer == me && event.agent.as_deref().is_none_or(|label| label == agent);
+            if from_self
                 || !team.members.contains_key(&env.signer)
                 || env.body.header.kind != "message"
             {

@@ -616,3 +616,103 @@ async fn sessions_touch_the_team_only_through_enrolled_agents() {
         false
     );
 }
+
+#[test]
+fn my_own_agents_can_message_each_other() {
+    let tmp = TempDir::new().unwrap();
+    let mut c = Client::open(tmp.path(), "Person").unwrap();
+    let (_, t) = team_with(&c);
+    let repo = tmp.path().join("copyk8");
+    std::fs::create_dir(&repo).unwrap();
+    let codex = c.attach("codex", &repo, None, None, None).unwrap()["agent"]["label"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let claude = c.attach("claude", &repo, None, None, None).unwrap()["agent"]["label"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for label in [&codex, &claude] {
+        c.enroll(label, true, None).unwrap();
+        c.publish(label, true).unwrap();
+    }
+    // Presence lists our own published agents, so to_agent resolves against ourselves too.
+    let mut team = c.team(&t.id).unwrap();
+    let me = c.identity.member().unwrap().id;
+    team.agents
+        .insert(me.clone(), c.agent_presence(&t.id).unwrap());
+    c.install_team(&team, &fixture_authority(), &"7".repeat(64), None)
+        .unwrap();
+    let eid = c
+        .enqueue(
+            &t.id,
+            "message",
+            "agent",
+            "please review",
+            Some(me.clone()),
+            None,
+            Value::Null,
+            Some(codex.clone()),
+            Some(claude.clone()),
+        )
+        .unwrap();
+    // Deliver it as the mailbox would: our own signed envelope comes back to us.
+    let envelope: String =
+        c.db.query_row("SELECT envelope FROM outbox WHERE id=?", [&eid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let envelope: Signed<Sealed> = serde_json::from_str(&envelope).unwrap();
+    c.receive(1, &envelope).unwrap();
+    assert_eq!(
+        c.unread(&claude).unwrap()["addressed"],
+        1,
+        "claude sees what codex wrote"
+    );
+    assert_eq!(
+        c.unread(&codex).unwrap()["addressed"],
+        0,
+        "codex does not count its own message"
+    );
+    let adapter = tmp.path().join("adapter.js");
+    std::fs::write(&adapter, "").unwrap();
+    c.worker_command(&json!({"operation":"bind","agent":claude,"adapter":adapter}))
+        .unwrap();
+    c.worker_command(&json!({"operation":"enable","agent":claude}))
+        .unwrap();
+    let work = c
+        .claim_work()
+        .unwrap()
+        .expect("a worker answers another of our own agents");
+    assert_eq!(work.agent, claude);
+    assert_eq!(work.sender_agent.as_deref(), Some(codex.as_str()));
+    c.finish_work(&work, Ok(json!({"text":"looks good"})))
+        .unwrap();
+    let reply: String =
+        c.db.query_row(
+            "SELECT envelope FROM outbox ORDER BY rowid DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let reply: Signed<Sealed> = serde_json::from_str(&reply).unwrap();
+    let reply: Event = serde_json::from_slice(&c.identity.open(&reply).unwrap()).unwrap();
+    assert_eq!(
+        (reply.agent.as_deref(), reply.to_agent.as_deref()),
+        (Some(claude.as_str()), Some(codex.as_str()))
+    );
+    // The reply, delivered back, is not offered to claude's own worker again.
+    let envelope: String =
+        c.db.query_row(
+            "SELECT envelope FROM outbox ORDER BY rowid DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    c.receive(2, &serde_json::from_str(&envelope).unwrap())
+        .unwrap();
+    assert!(
+        c.claim_work().unwrap().is_none(),
+        "a worker never answers itself"
+    );
+}
