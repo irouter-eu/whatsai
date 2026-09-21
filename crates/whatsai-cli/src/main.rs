@@ -576,7 +576,7 @@ async fn main() -> anyhow::Result<()> {
     let action = command["action"].as_str().unwrap_or("").to_owned();
     let result = whatsai_core::daemon::request(&state, command.clone()).await?;
     if args.table {
-        // Inbox rows name senders when the team roster is at hand.
+        // Inbox rows name senders and sessions as the team does when the roster is at hand.
         let names = if matches!(action.as_str(), "inbox" | "files") {
             let mut list = json!({"action":"list"});
             for key in ["team", "cwd"] {
@@ -586,7 +586,6 @@ async fn main() -> anyhow::Result<()> {
             }
             whatsai_core::daemon::request(&state, list)
                 .await
-                .map(|t| t["members"].clone())
                 .unwrap_or(json!({}))
         } else {
             json!({})

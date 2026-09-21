@@ -4,7 +4,7 @@
       "command": "whatsai-mcp",
       "env": {
         "WHATSAI_HARNESS": "claude",
-        "WHATSAI_PLUGIN_VERSION": "0.9.0"
+        "WHATSAI_PLUGIN_VERSION": "0.9.1"
       }
     }
   }
