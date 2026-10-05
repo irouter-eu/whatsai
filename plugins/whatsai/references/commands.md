@@ -1,5 +1,7 @@
 # WhatsAI MCP arguments
 
+In Claude Code these are `/whatsai:NAME` skills; in Codex they are `$whatsai-NAME` (run `/skills` to list them).
+
 Read actions (list, teams, agents, inbox, files, requests) return the daemon's own finished table as text, identical in every harness and in `whatsai ... --table`; show it as it is. Claude's read-only skills additionally fetch it with the CLI before the model runs. The tool's other actions are for changes. The terminal client `whatsai ui` covers everything below without a model.
 
 Call the `whatsai` tool with `action` and an `args` object. The adapter supplies `actor: agent` and, for agent-scoped actions, `agent`: this session's label (`harness@workspace`). Do not paste join keys or local secrets into team messages.

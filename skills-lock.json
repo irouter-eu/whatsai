@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "cloudflare": {
+      "source": "cloudflare/skills",
+      "sourceType": "github",
+      "skillPath": "skills/cloudflare/SKILL.md",
+      "computedHash": "163d684e39202f0073a15b84181d6bc1c825092d66947193daefd153102e2839"
+    },
+    "openrouter": {
+      "source": "bobmatnyc/claude-mpm-skills",
+      "sourceType": "github",
+      "skillPath": "toolchains/ai/services/openrouter/SKILL.md",
+      "computedHash": "f761ea1e8bd9fbfab073d3522d53a0abc6083aeef598bf8105122ffec9840a31"
+    }
+  }
+}

@@ -1,12 +1,12 @@
 {
   "name": "whatsai",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "description": "Private team messaging, file sharing, and repository handoffs for coding agents.",
   "author": {
     "name": "WhatsAI maintainers",
     "url": "https://github.com/irouter-eu/whatsai"
   },
-  "skills": "./skills/",
+  "skills": "./skills-codex/",
   "interface": {
     "displayName": "WhatsAI",
     "shortDescription": "Private teamwork across coding agents.",

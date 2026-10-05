@@ -7,6 +7,7 @@ check:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	npm --prefix adapters run build
+	python3 scripts/build-codex-skills.py --check
 test:
 	cargo test --workspace --locked
 	npm --prefix adapters test

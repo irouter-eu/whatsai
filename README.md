@@ -114,7 +114,7 @@ Alternatively, for MCP-only access in Codex without installing the plugin or its
 codex mcp add whatsai -- whatsai-mcp
 ```
 
-Then ask Codex to use the WhatsAI tool. The plugin manifest/skills are supplied for plugin installation; do not assume Claude slash-command syntax works unchanged in Codex.
+In Codex, skills are invoked with `$`, not `/`: run `/skills` to see them and type `$whatsai-list`, `$whatsai-send`, `$whatsai-publish` and so on. The Codex skill set is generated from the Claude one by `scripts/build-codex-skills.py` (checked by `make check`), with plugin-prefixed names and tool calls in place of the pre-run shell blocks Claude supports.
 
 For a local Claude plugin session:
 

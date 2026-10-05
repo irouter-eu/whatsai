@@ -675,11 +675,32 @@ impl Client {
         let t = self.team(team)?;
         let me = self.identity.member()?.id;
         ensure!(t.members.contains_key(&me), "not a current member");
+        // Our own agents enrolled in this team can reach each other without being published:
+        // publishing shows an agent to teammates, it is not what lets two of our sessions talk.
+        let own_agent = |label: &str| {
+            self.agent(label)
+                .is_ok_and(|a| a["team"] == team && a["enrolled"] == true && a["retired"] != true)
+        };
         // `to` may be a fingerprint, a display name, an agent label, or `name/label`.
         let (to, to_agent) = match to {
             Some(target) if !t.members.contains_key(&target) => {
-                let (member, label) = resolve_address(&t, &target)?;
-                (Some(member), to_agent.or(label))
+                match resolve_address(&t, &target) {
+                    Ok((member, label)) => (Some(member), to_agent.or(label)),
+                    // Not a published participant: it may still be one of our own agents,
+                    // named alone or as `our-name/label`.
+                    Err(err) => {
+                        let (person, label) = match target.split_once('/') {
+                            Some((p, l)) => (Some(p.trim()), l.trim()),
+                            None => (None, target.trim()),
+                        };
+                        let mine = person
+                            .is_none_or(|p| resolve_address(&t, p).is_ok_and(|(m, _)| m == me));
+                        if !(mine && own_agent(label)) {
+                            return Err(err);
+                        }
+                        (Some(me.clone()), Some(label.to_owned()))
+                    }
+                }
             }
             other => (other, to_agent),
         };
@@ -696,6 +717,7 @@ impl Client {
         // A fresh address must name an agent the recipient has published; a reply reuses the
         // label that just wrote to us, which is evidence enough even if presence lags.
         if let (Some(label), Some(target), None) = (&to_agent, &to, &reply_to)
+            && !(*target == me && own_agent(label))
             && let Some(published) = t.agents.get(target).and_then(|a| a.as_array())
         {
             ensure!(

@@ -11,13 +11,58 @@ export function stamp(command:Record<string,unknown>,session:Attached):Record<st
  return {...command,via:session.label??'unattached'};
 }
 
-/** Which coding agent launched us: explicit env first, then the harness's own markers. */
-export function detectHarness(env:NodeJS.ProcessEnv=process.env):string {
+/**
+ * Which coding agent launched us. An explicit WHATSAI_HARNESS wins; otherwise the parent
+ * process decides, because environment markers like CLAUDECODE are inherited by anything
+ * started from a Claude Code shell, Codex included. Env markers are only the last resort.
+ */
+export function detectHarness(env:NodeJS.ProcessEnv=process.env,parent:string=parentCommand()):string {
  const explicit=env.WHATSAI_HARNESS?.trim().toLowerCase();
  if(explicit)return explicit;
- if(env.CLAUDECODE || env.CLAUDE_CODE_SESSION_ID)return 'claude';
+ const fromParent=harnessFromCommand(parent);
+ if(fromParent)return fromParent;
  if(env.CODEX_SANDBOX || env.CODEX_HOME || env.CODEX_THREAD_ID)return 'codex';
+ if(env.CLAUDECODE || env.CLAUDE_CODE_SESSION_ID)return 'claude';
  return 'agent';
+}
+/** The harness named by a parent process command line, if any. */
+export function harnessFromCommand(command:string):string|undefined {
+ for(const line of command.split('\n')){
+  const first=(line.trim().split(/\s+/)[0]??'').split('/').pop()??'';
+  const lower=line.toLowerCase();
+  if(first==='codex' || /(^|\/)codex(\s|$)/.test(lower) || /codex-cli|codex\.js/.test(lower))return 'codex';
+  if(first==='claude' || /(^|\/)claude(\s|$)/.test(lower) || /claude-code|@anthropic-ai\/claude-code/.test(lower))return 'claude';
+ }
+ return undefined;
+}
+/**
+ * The command lines of our ancestors, nearest first, up to four levels, joined by newlines:
+ * a harness that launches MCP servers through a shell still shows up one step further out.
+ * /proc on Linux, ps elsewhere; empty when neither is available.
+ */
+export function parentCommand():string {
+ const lines:string[]=[];
+ let pid=process.ppid;
+ for(let depth=0;depth<4 && pid>1;depth++){
+  let command='';let next=0;
+  try{
+   const {readFileSync}=require('node:fs');
+   command=readFileSync(`/proc/${pid}/cmdline`).toString('utf8').split('\0').join(' ').trim();
+   const stat=readFileSync(`/proc/${pid}/stat`,'utf8');
+   next=Number(stat.slice(stat.lastIndexOf(')')+2).split(' ')[1]);
+  }catch{
+   try{
+    const {execFileSync}=require('node:child_process');
+    const out=execFileSync('ps',['-o','ppid=,command=','-p',String(pid)],{encoding:'utf8'}).trim();
+    const m=/^(\d+)\s+(.*)$/.exec(out);
+    if(m){next=Number(m[1]);command=m[2];}
+   }catch{break;}
+  }
+  if(command)lines.push(command);
+  if(harnessFromCommand(command))break;
+  pid=next;
+ }
+ return lines.join('\n');
 }
 export function detectSession(env:NodeJS.ProcessEnv=process.env):string|undefined {
  return env.WHATSAI_SESSION || env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;

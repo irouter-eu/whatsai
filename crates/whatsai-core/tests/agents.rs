@@ -716,3 +716,75 @@ fn my_own_agents_can_message_each_other() {
         "a worker never answers itself"
     );
 }
+
+#[test]
+fn my_own_enrolled_agents_reach_each_other_without_publishing() {
+    let tmp = TempDir::new().unwrap();
+    let mut c = Client::open(tmp.path(), "Person").unwrap();
+    let (_, t) = team_with(&c);
+    let repo = tmp.path().join("whatsai");
+    std::fs::create_dir(&repo).unwrap();
+    let attach = |harness: &str, dir: &std::path::Path| {
+        c.attach(harness, dir, None, None, None).unwrap()["agent"]["label"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let codex = attach("codex", &repo);
+    let claude = attach("claude", &repo);
+    // Enrolled, so both take part in the team, but neither is published to teammates.
+    for label in [&codex, &claude] {
+        c.enroll(label, true, None).unwrap();
+    }
+    // An agent that never joined the team stays unreachable.
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let stray = attach("claude", &elsewhere);
+    // Presence carries our (empty) published list, as the live team does.
+    let mut team = c.team(&t.id).unwrap();
+    let me = c.identity.member().unwrap().id;
+    team.agents
+        .insert(me.clone(), c.agent_presence(&t.id).unwrap());
+    c.install_team(&team, &fixture_authority(), &"7".repeat(64), None)
+        .unwrap();
+    let send = |to: Option<String>, to_agent: Option<String>| {
+        c.enqueue(
+            &t.id,
+            "message",
+            "agent",
+            "ping",
+            to,
+            None,
+            Value::Null,
+            Some(codex.clone()),
+            to_agent,
+        )
+    };
+    let sent = [
+        send(Some(claude.clone()), None).expect("by label alone"),
+        send(Some(format!("Person/{claude}")), None).expect("by our name and the label"),
+        send(Some(me.clone()), Some(claude.clone())).expect("by fingerprint and to_agent"),
+    ];
+    let err = send(Some(stray.clone()), None).unwrap_err().to_string();
+    assert!(err.contains("nobody in this team"), "{err}");
+    let err = send(Some(me.clone()), Some(stray.clone()))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("has not published"), "{err}");
+    for (seq, eid) in sent.iter().enumerate() {
+        let envelope: String =
+            c.db.query_row("SELECT envelope FROM outbox WHERE id=?", [eid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let envelope: Signed<Sealed> = serde_json::from_str(&envelope).unwrap();
+        let event: Event = serde_json::from_slice(&c.identity.open(&envelope).unwrap()).unwrap();
+        assert_eq!(
+            (event.to.as_deref(), event.to_agent.as_deref()),
+            (Some(me.as_str()), Some(claude.as_str()))
+        );
+        c.receive(seq as i64 + 1, &envelope).unwrap();
+    }
+    assert_eq!(c.unread(&claude).unwrap()["addressed"], 3);
+    assert_eq!(c.unread(&codex).unwrap()["addressed"], 0);
+}

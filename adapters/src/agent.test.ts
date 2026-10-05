@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,writeFileSync,chmodSync,readFileSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {attachAgent,detectHarness,detectSession,stamp} from './agent.js';
+import {attachAgent,detectHarness,detectSession,harnessFromCommand,parentCommand,stamp} from './agent.js';
 
 test('every session call is stamped with its agent, or marked unattached',()=>{
  assert.deepEqual(stamp({action:'list'},{harness:'claude',workspace:'/x',label:'claude@x'}),{action:'list',via:'claude@x'});
@@ -11,11 +11,18 @@ test('every session call is stamped with its agent, or marked unattached',()=>{
  assert.deepEqual(stamp({action:'list'},{harness:'claude',workspace:'/x'}),{action:'list',via:'unattached'});
 });
 
-test('harness detection prefers the explicit variable, then harness markers',()=>{
- assert.equal(detectHarness({WHATSAI_HARNESS:' Claude '}),'claude');
- assert.equal(detectHarness({CLAUDECODE:'1'}),'claude');
- assert.equal(detectHarness({CODEX_HOME:'/x'}),'codex');
- assert.equal(detectHarness({}),'agent');
+test('harness detection prefers the explicit variable, then the parent process, then env markers',()=>{
+ assert.equal(detectHarness({WHATSAI_HARNESS:' Claude '},'codex'),'claude');
+ assert.equal(detectHarness({CLAUDECODE:'1'},'/home/u/.cargo/bin/codex --model o3'),'codex','a Codex started from a Claude shell is still Codex');
+ assert.equal(detectHarness({CLAUDECODE:'1'},'claude --resume abc'),'claude');
+ assert.equal(detectHarness({CLAUDECODE:'1'},''),'claude','env markers decide only when the parent is unknown');
+ assert.equal(detectHarness({CODEX_HOME:'/x'},''),'codex');
+ assert.equal(detectHarness({},'bash'),'agent');
+ assert.equal(harnessFromCommand('node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js'),'claude');
+ assert.equal(harnessFromCommand('/opt/homebrew/bin/codex-cli app-server'),'codex');
+ assert.equal(harnessFromCommand('zsh'),undefined);
+ assert.equal(harnessFromCommand('sh -c whatsai-mcp\n/usr/local/bin/codex\nclaude'),'codex','the nearest harness in the ancestor chain wins');
+ assert.equal(typeof parentCommand(),'string');
  assert.equal(detectSession({CLAUDE_CODE_SESSION_ID:'abc'}),'abc');
  assert.equal(detectSession({}),undefined);
 });

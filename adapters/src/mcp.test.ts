@@ -30,7 +30,7 @@ test('MCP reaches the real daemon and cannot override its declared action', {ski
   assert.match((published.content as any[])[0].text,/not a member of a team yet|say which team/);
   const version=await client.callTool({name:'whatsai',arguments:{action:'version'}});
   const v=JSON.parse((version.content as any[])[0].text);
-  assert.equal(v.adapter,'0.9.3');assert.equal(v.plugin,'test-plugin');assert.match(v.daemon,/^\d+\.\d+\.\d+$/);assert.equal(typeof v.database,'number');assert.equal(v.mismatch,v.daemon!=='0.9.3');
+  assert.equal(v.adapter,'0.10.0');assert.equal(v.plugin,'test-plugin');assert.match(v.daemon,/^\d+\.\d+\.\d+$/);assert.equal(typeof v.database,'number');assert.equal(v.mismatch,v.daemon!=='0.10.0');
   const teams=await client.callTool({name:'whatsai',arguments:{action:'teams'}});
   assert.match((teams.content as any[])[0].text,/^No teams\./,'an empty table still reads as a sentence');
   const unread=await client.callTool({name:'whatsai',arguments:{action:'unread'}});
