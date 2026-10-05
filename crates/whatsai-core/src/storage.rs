@@ -200,7 +200,7 @@ UPDATE agents SET team=(SELECT id FROM teams LIMIT 1) WHERE enrolled=1;
 UPDATE agents SET enrolled=0 WHERE team IS NULL;
 DELETE FROM config WHERE key IN ('team','authority','secret','cursor','joining','creation_intent','creation_secret');
 "#;
-/// A session can be named in its team: `aurelien/reviewer` rather than `aurelien/claude`.
+/// A session can be named in its team: `aurelien@7d7dc33e/reviewer` rather than `aurelien@7d7dc33e/claude`.
 const CLIENT_SCHEMA_V6: &str = r#"
 ALTER TABLE agents ADD COLUMN nick TEXT;
 "#;

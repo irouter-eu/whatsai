@@ -311,7 +311,7 @@ async fn the_founding_session_is_visible_in_its_team() {
 }
 
 #[test]
-fn people_and_their_sessions_are_addressable_by_name() {
+fn people_and_their_sessions_are_addressable_by_name_and_fingerprint() {
     use whatsai_core::{client::resolve_address, crypto::Identity, protocol::*};
     let alice = Identity::generate("Alice Smith");
     let bob = Identity::generate("bob");
@@ -349,17 +349,22 @@ fn people_and_their_sessions_are_addressable_by_name() {
         );
     }
     let mut team = whatsai_core::governance::replay(&history, &founder.id).unwrap();
-    let handles = member_handles(&team);
-    assert_eq!(handles[&founder.id], "alice-smith");
-    assert_eq!(handles[&bob.member().unwrap().id], "bob");
-    assert_eq!(
-        handles[&bob2.member().unwrap().id],
-        "bob-2",
-        "same name, admission order decides"
-    );
-    // Everyone runs Claude in copyk8; alice also has a second Claude checkout and a Codex.
-    team.agents.insert(
+    let (a_id, b_id, b2_id) = (
         founder.id.clone(),
+        bob.member().unwrap().id,
+        bob2.member().unwrap().id,
+    );
+    let (a_fp, b_fp, b2_fp) = (fingerprint(&a_id), fingerprint(&b_id), fingerprint(&b2_id));
+    let handles = member_handles(&team);
+    assert_eq!(handles[&a_id], format!("alice-smith@{a_fp}"));
+    assert_eq!(handles[&b_id], format!("bob@{b_fp}"));
+    assert_eq!(
+        handles[&b2_id],
+        format!("bob@{b2_fp}"),
+        "same name, different key, no suffix games"
+    );
+    team.agents.insert(
+        a_id.clone(),
         json!([
             {"label":"codex@copyk8","harness":"codex","online":true},
             {"label":"claude@copyk8","harness":"claude","online":true},
@@ -367,81 +372,97 @@ fn people_and_their_sessions_are_addressable_by_name() {
         ]),
     );
     team.agents.insert(
-        bob.member().unwrap().id.clone(),
+        b_id.clone(),
         json!([{"label":"claude@copyk8","harness":"claude","online":true}]),
     );
     let names: Vec<String> = participants(&team).into_iter().map(|p| p.handle).collect();
+    let mut expected = vec![
+        format!("alice-smith@{a_fp}/claude"),
+        format!("alice-smith@{a_fp}/claude-2"),
+        format!("alice-smith@{a_fp}/codex"),
+        format!("bob@{b_fp}/claude"),
+    ];
+    expected.sort();
+    assert_eq!(names, expected);
     assert_eq!(
-        names,
-        vec![
-            "alice-smith/claude",
-            "alice-smith/claude-2",
-            "alice-smith/codex",
-            "bob/claude"
-        ]
+        handle_of(&team, &a_id, "claude@copyk8-2").as_deref(),
+        Some(format!("alice-smith@{a_fp}/claude-2").as_str())
     );
-    assert_eq!(
-        handle_of(&team, &founder.id, "claude@copyk8-2").as_deref(),
-        Some("alice-smith/claude-2")
-    );
-    // People by handle, display name, or fingerprint.
     assert_eq!(
         resolve_address(&team, "alice-smith").unwrap(),
-        (founder.id.clone(), None)
+        (a_id.clone(), None)
+    );
+    assert_eq!(
+        resolve_address(&team, &format!("alice-smith@{a_fp}")).unwrap(),
+        (a_id.clone(), None)
+    );
+    assert_eq!(
+        resolve_address(&team, &format!("@{a_fp}")).unwrap(),
+        (a_id.clone(), None)
+    );
+    assert_eq!(
+        resolve_address(&team, &a_fp[..6]).unwrap(),
+        (a_id.clone(), None)
     );
     assert_eq!(
         resolve_address(&team, "Alice Smith").unwrap(),
-        (founder.id.clone(), None)
+        (a_id.clone(), None)
+    );
+    assert_eq!(resolve_address(&team, &a_id).unwrap(), (a_id.clone(), None));
+    let err = resolve_address(&team, "bob").unwrap_err().to_string();
+    assert!(
+        err.contains(&format!("bob@{b_fp}")) && err.contains(&format!("bob@{b2_fp}")),
+        "{err}"
     );
     assert_eq!(
-        resolve_address(&team, &founder.id).unwrap(),
-        (founder.id.clone(), None)
+        resolve_address(&team, &format!("bob@{b2_fp}")).unwrap(),
+        (b2_id.clone(), None)
     );
     assert_eq!(
-        resolve_address(&team, "bob-2").unwrap(),
-        (bob2.member().unwrap().id.clone(), None)
+        resolve_address(&team, &format!("Bob@{b_fp}")).unwrap(),
+        (b_id.clone(), None)
     );
-    // Sessions by person/handle; the label the recipient routes on comes back with it.
     assert_eq!(
-        resolve_address(&team, "bob/claude").unwrap(),
-        (
-            bob.member().unwrap().id.clone(),
-            Some("claude@copyk8".into())
-        )
+        resolve_address(&team, &format!("bob@{b_fp}/claude")).unwrap(),
+        (b_id.clone(), Some("claude@copyk8".into()))
+    );
+    assert_eq!(
+        resolve_address(&team, &format!("@{b_fp}/claude")).unwrap(),
+        (b_id.clone(), Some("claude@copyk8".into()))
     );
     assert_eq!(
         resolve_address(&team, "alice-smith/claude-2").unwrap(),
-        (founder.id.clone(), Some("claude@copyk8-2".into()))
+        (a_id.clone(), Some("claude@copyk8-2".into()))
     );
     assert_eq!(
         resolve_address(&team, "alice-smith/codex").unwrap(),
-        (founder.id.clone(), Some("codex@copyk8".into()))
+        (a_id.clone(), Some("codex@copyk8".into()))
     );
-    // Bare handles work only when unique in the team, and say who the candidates are.
+    let err = resolve_address(&team, "bob/claude")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("several members"), "{err}");
     assert_eq!(
         resolve_address(&team, "codex").unwrap(),
-        (founder.id.clone(), Some("codex@copyk8".into()))
+        (a_id.clone(), Some("codex@copyk8".into()))
     );
     let err = resolve_address(&team, "claude").unwrap_err().to_string();
     assert!(
-        err.contains("alice-smith/claude") && err.contains("bob/claude"),
+        err.contains(&format!("alice-smith@{a_fp}/claude"))
+            && err.contains(&format!("bob@{b_fp}/claude")),
         "{err}"
     );
-    // "bob" is the first bob's handle; the display name "Bob" fits both and must be qualified.
-    assert_eq!(
-        resolve_address(&team, "bob").unwrap(),
-        (bob.member().unwrap().id.clone(), None)
-    );
-    let err = resolve_address(&team, "Bob").unwrap_err().to_string();
-    assert!(err.contains("several members"), "{err}");
     assert!(resolve_address(&team, "carol").is_err());
-    assert!(resolve_address(&team, "bob/codex").is_err());
-    // Still nothing lets a local label collide: the old label form resolves only when unique.
+    assert!(
+        resolve_address(&team, "@zz").is_err(),
+        "fingerprint prefixes need four hex digits"
+    );
+    assert!(resolve_address(&team, "alice-smith/nothing").is_err());
     assert_eq!(
         resolve_address(&team, "codex@copyk8").unwrap().1.as_deref(),
-        Some("codex@copyk8")
+        Some("codex@copyk8"),
+        "a unique local label still resolves"
     );
-    assert!(resolve_address(&team, "claude@copyk8").is_err());
 }
 
 #[tokio::test]
@@ -495,16 +516,23 @@ async fn a_taken_name_is_refused_with_a_free_suggestion_and_sessions_can_be_name
         .to_owned();
     c.publish(&codex, true).unwrap();
     let info = c.agent(&codex).unwrap();
-    assert_eq!(info["suggested_handle"], "founder/codex");
+    let fp = whatsai_core::protocol::fingerprint(&c.identity.member().unwrap().id);
+    assert_eq!(info["suggested_handle"], format!("founder@{fp}/codex"));
     let named = c.name_agent(&codex, "Reviewer Bot").unwrap();
     assert_eq!(named["nick"], "reviewer-bot");
-    assert_eq!(named["suggested_handle"], "founder/reviewer-bot");
+    assert_eq!(
+        named["suggested_handle"],
+        format!("founder@{fp}/reviewer-bot")
+    );
     let mut t = c.team(&team).unwrap();
     t.agents.insert(
         c.identity.member().unwrap().id,
         c.agent_presence(&team).unwrap(),
     );
-    assert_eq!(participants(&t)[0].handle, "founder/reviewer-bot");
+    assert_eq!(
+        participants(&t)[0].handle,
+        format!("founder@{fp}/reviewer-bot")
+    );
     assert!(c.name_agent(&codex, &"x".repeat(33)).is_err());
     assert_eq!(
         c.name_agent(&codex, "").unwrap()["nick"],

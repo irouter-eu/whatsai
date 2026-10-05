@@ -12,9 +12,10 @@ def main():
   env={**os.environ,'WHATSAI_RELAY':'off'}
   def start(name,args):
    log=open(base/(name+'.log'),'w');p=subprocess.Popen(args,stdout=log,stderr=log,env=env);processes.append((p,log));return p
-  def cli(who,*args,check=True):
+  def cli(who,*args,check=True,raw=False):
    r=subprocess.run([str(BIN/'whatsai'),'--state',str(base/who),*args],capture_output=True,text=True,timeout=60)
    if check and r.returncode:raise AssertionError(r.stderr)
+   if raw:return r.stdout
    return json.loads(r.stdout) if r.returncode==0 else r
   def rpc(who,op):
    r=subprocess.run([str(BIN/'whatsai'),'--state',str(base/who),'rpc'],input=json.dumps(op),capture_output=True,text=True,timeout=60)
@@ -84,8 +85,11 @@ def main():
    cli('bob','agent','publish',claude_label);cli('bob','agent','publish','codex@app');cli('bob','sync');cli('charlie','sync')
    published=cli('charlie','list')['agents'][bob];assert {a['label'] for a in published}=={'claude@app','codex@app'} and all('workspace' in a and '/' not in a['workspace'] for a in published)
    assert cli('charlie','send','wrong label','--to',bob,'--to-agent','claude@nowhere',check=False).returncode!=0
-   # Teammates address people by name and sessions as person/session; bare session names only when unique.
+   # Addresses are name@fingerprint/session; every short form resolves while it is unique in the team.
    cli('charlie','send','for claude only','--to','bob/claude');cli('charlie','send','for everyone');cli('charlie','send','by name','--to','bob');assert cli('charlie','send','nobody','--to','zed',check=False).returncode!=0
+   fp=bob[:8];rows=cli('charlie','list','--table',raw=True);assert f'bob@{fp}/claude' in rows and f'bob@{fp}/codex' in rows,rows
+   for to in (f'bob@{fp}/claude',f'@{fp}/claude',f'bob@{fp}',f'@{fp}',fp[:4]): assert cli('charlie','send',f'via {to}','--to',to)['state']=='queued',to
+   assert cli('charlie','send','wrong key','--to',f'bob@{"0"*8}/claude',check=False).returncode!=0,'a fingerprint that is not in the team is refused'
    assert cli('charlie','send','bare unique','--to','codex')['state']=='queued','only bob publishes codex here'
    cli('bob','agent','name',claude_label,'Reviewer');cli('bob','sync');cli('charlie','sync')
    assert any(a['nick']=='reviewer' for a in cli('charlie','list')['agents'][bob]),'a named session is published under its name'
@@ -94,8 +98,8 @@ def main():
    cli('charlie','sync');cli('bob','sync')
    named=[x for x in cli('bob','inbox') if x['event']['text']=='by name'];assert named and named[0]['event']['to']==bob and named[0]['event'].get('to_agent') is None,'a name resolves to the member'
    claude_unread=cli('bob','agent','unread','--agent',claude_label);codex_unread=cli('bob','agent','unread','--agent','codex@app')
-   assert (claude_unread['addressed'],codex_unread['addressed'])==(2,1),(claude_unread,codex_unread)
-   assert claude_unread['shared']>=2
+   assert (claude_unread['addressed'],codex_unread['addressed'])==(4,1),('for claude only, two fingerprint forms and the reviewer name reach claude; codex only the bare session name',claude_unread,codex_unread)
+   assert claude_unread['shared']>=5,'everyone, by name, and the three person-level fingerprint forms are shared by both sessions'
    assert all(x['event'].get('to_agent') in (None,claude_label) for x in cli('bob','inbox','--agent',claude_label))
    cli('bob','agent','mark-read',claude_label);assert cli('bob','agent','unread','--agent',claude_label)['addressed']==0
    assert cli('bob','agent','unread','--agent','codex@app')['shared']>=2,'cursors are per agent'

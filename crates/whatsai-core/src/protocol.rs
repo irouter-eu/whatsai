@@ -289,35 +289,26 @@ pub fn slug(name: &str) -> String {
     let out = out.trim_end_matches('-').to_owned();
     if out.is_empty() { "member".into() } else { out }
 }
-/// Team-scoped names for people: the founder first, then members in admission order, each
-/// getting their slug or slug-2, slug-3 when taken. Every client derives the same table.
-pub fn member_handles(team: &Team) -> BTreeMap<String, String> {
-    let mut handles: BTreeMap<String, String> = BTreeMap::new();
-    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut order: Vec<&Member> = vec![];
-    for record in &team.history {
-        if let Some(m) = &record.body.member
-            && team.members.contains_key(&m.id)
-            && !order.iter().any(|o| o.id == m.id)
-        {
-            order.push(m);
-        }
-    }
-    for m in order {
-        let base = slug(&m.name);
-        let mut handle = base.clone();
-        let mut n = 1;
-        while !taken.insert(handle.clone()) {
-            n += 1;
-            handle = format!("{base}-{n}");
-        }
-        handles.insert(m.id.clone(), handle);
-    }
-    handles
+/// The short fingerprint that identifies a member in an address.
+pub fn fingerprint(id: &str) -> String {
+    id.chars().take(8).collect()
 }
-/// One published agent as the team addresses it: `person/harness`, or `person/harness-2` when
-/// that person publishes several agents of one harness here. Derived from presence order, so
-/// the sender and every recipient agree.
+/// Team-scoped names for people: `name@fingerprint`, unique by construction because the
+/// fingerprint is the member's own key. Every client derives the same table.
+pub fn member_handles(team: &Team) -> BTreeMap<String, String> {
+    team.members
+        .values()
+        .map(|m| {
+            (
+                m.id.clone(),
+                format!("{}@{}", slug(&m.name), fingerprint(&m.id)),
+            )
+        })
+        .collect()
+}
+/// One published session as the team addresses it: `name@fingerprint/harness`, or `.../harness-2`
+/// when that person publishes several sessions of one harness here. Derived from presence order,
+/// so the sender and every recipient agree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Participant {
     pub handle: String,

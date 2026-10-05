@@ -84,8 +84,8 @@ pub fn teams(v: &Value) -> Vec<String> {
     )
 }
 /// The team as a flat list of participants: one row per published session, named as the team
-/// addresses it (`alice/claude`), carrying its person's role and fingerprint. A member with no
-/// published session gets a single row under their name so admins can still act on them.
+/// addresses it (`alice@7d7dc33e/claude`), carrying its person's role. A member with no
+/// published session gets a single row under `name@fingerprint` so admins can still act on them.
 pub fn members(team_v: &Value) -> Vec<String> {
     let team: Option<crate::protocol::Team> = serde_json::from_value(team_v.clone()).ok();
     let now = crate::protocol::now();
@@ -118,7 +118,6 @@ pub fn members(team_v: &Value) -> Vec<String> {
                         .unwrap_or_else(|| m.name.clone()),
                     role.into(),
                     state,
-                    short(&m.id),
                     String::new(),
                 ]);
                 continue;
@@ -137,7 +136,6 @@ pub fn members(team_v: &Value) -> Vec<String> {
                     p.handle.clone(),
                     role.into(),
                     if p.online { "online" } else { "offline" }.into(),
-                    short(&m.id),
                     extra,
                 ]);
             }
@@ -152,10 +150,7 @@ pub fn members(team_v: &Value) -> Vec<String> {
             .map(|r| format!(" on {r}"))
             .unwrap_or_default()
     )];
-    out.extend(table(
-        &["ADDRESS", "ROLE", "STATE", "FINGERPRINT", "WORKSPACE"],
-        &rows,
-    ));
+    out.extend(table(&["ADDRESS", "ROLE", "STATE", "WORKSPACE"], &rows));
     out
 }
 pub fn requests(v: &Value) -> Vec<String> {
@@ -419,15 +414,14 @@ mod tests {
         assert_eq!(lines[0], "Team whatsai (3e4d9441) on https://x/y.git");
         assert!(lines[1].starts_with("ADDRESS"));
         assert!(
-            lines[3].starts_with("aurelien/claude")
+            lines[3].starts_with("aurelien@aaaa1111/claude")
                 && lines[3].contains("founder, admin")
-                && lines[3].contains("online")
-                && lines[3].contains("aaaa1111"),
+                && lines[3].contains("online"),
             "{}",
             lines[3]
         );
         assert!(
-            lines[4].starts_with("bob")
+            lines[4].starts_with("bob@cccc2222")
                 && lines[4].contains("member")
                 && lines[4].contains("never seen"),
             "a member with no sessions keeps one row: {}",
@@ -447,16 +441,16 @@ mod tests {
         assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.err());
         let lines = inbox(&inbox_v, &team);
         assert!(
-            lines[2].contains("aurelien/claude")
+            lines[2].contains("aurelien@aaaa1111/claude")
                 && lines[2].contains("everyone")
                 && lines[2].contains("hi there"),
             "{}",
             lines[2]
         );
         assert!(
-            lines[3].contains("bob")
+            lines[3].contains("bob@cccc2222")
                 && lines[3].contains("[status blocked] waiting")
-                && lines[3].contains("aurelien/claude"),
+                && lines[3].contains("aurelien@aaaa1111/claude"),
             "{}",
             lines[3]
         );

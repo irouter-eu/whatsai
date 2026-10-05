@@ -22,37 +22,59 @@ use std::{
 /// id, state, envelope, error, team.
 type OutboxRow = (String, String, String, Option<String>, Option<String>);
 
-/// Turn a human address into a member fingerprint and, when it names an agent, that agent's
-/// local label. Accepts a person (`alice`, a display name, or a fingerprint), a participant
-/// (`alice/claude`, `alice/claude-2`), a bare agent handle (`claude`) when exactly one
-/// participant in the team has it, or an agent's local label when unique.
+/// Turn a human address into a member fingerprint and, when it names a session, that session's
+/// local label. People: `alice`, `alice@7d7dc33e`, `@7d7dc33e`, a fingerprint prefix of at least
+/// four hex digits, a display name, or a full id. Sessions: any of those followed by `/claude`,
+/// or a bare session name when exactly one participant in the team has it.
 pub fn resolve_address(team: &Team, address: &str) -> Result<(String, Option<String>)> {
     let address = address.trim();
-    let people = member_handles(team);
     let all = participants(team);
     let find_person = |who: &str| -> Vec<String> {
-        let who_slug = slug(who);
+        let who = who.trim();
+        let (name, fp) = match who.split_once('@') {
+            Some((n, f)) => (n.trim(), Some(f.trim().to_ascii_lowercase())),
+            None => (who, None),
+        };
+        let fp = fp.filter(|f| !f.is_empty());
         team.members
             .values()
             .filter(|m| {
-                m.id == who || m.name == who || people.get(&m.id).is_some_and(|h| *h == who_slug)
+                let name_ok = name.is_empty() || m.name == name || slug(&m.name) == slug(name);
+                let fp_ok = match &fp {
+                    Some(f) => f.len() >= 4 && m.id.starts_with(f.as_str()),
+                    None => true,
+                };
+                (name_ok && fp_ok)
+                    || (fp.is_none()
+                        && !name.is_empty()
+                        && m.id.starts_with(name)
+                        && name.len() >= 4)
             })
             .map(|m| m.id.clone())
             .collect()
     };
-    if let Some((person, agent)) = address.split_once('/') {
-        let members = find_person(person.trim());
-        ensure!(!members.is_empty(), "no member named {person:?}");
+    if let Some((person, session)) = address.rsplit_once('/') {
+        let members = find_person(person);
+        ensure!(!members.is_empty(), "no member matches {person:?}");
         ensure!(
             members.len() == 1,
-            "{person:?} matches several members; use a fingerprint"
+            "{person:?} matches several members; add the fingerprint, as in {}",
+            members
+                .iter()
+                .map(|id| format!("{person}@{}", fingerprint(id)))
+                .collect::<Vec<_>>()
+                .join(" or ")
         );
-        let wanted = format!("{}/{}", people[&members[0]], slug(agent.trim()));
+        let wanted = slug(session.trim());
         let hit = all
             .iter()
-            .find(|p| p.member == members[0] && (p.handle == wanted || p.label == agent.trim()))
+            .find(|p| {
+                p.member == members[0]
+                    && (p.handle.rsplit_once('/').is_some_and(|(_, a)| a == wanted)
+                        || p.label == session.trim())
+            })
             .with_context(|| {
-                format!("{person} has not published {agent:?}; list shows their participants")
+                format!("{person} has not published {session:?}; list shows their sessions")
             })?;
         return Ok((hit.member.clone(), Some(hit.label.clone())));
     }
@@ -62,7 +84,12 @@ pub fn resolve_address(team: &Team, address: &str) -> Result<(String, Option<Str
     }
     ensure!(
         members.is_empty(),
-        "{address:?} matches several members; use PERSON/AGENT or a fingerprint"
+        "{address:?} matches several members; add the fingerprint, as in {}",
+        members
+            .iter()
+            .map(|id| format!("{address}@{}", fingerprint(id)))
+            .collect::<Vec<_>>()
+            .join(" or ")
     );
     let wanted = slug(address);
     let hits: Vec<&Participant> = all
@@ -73,9 +100,7 @@ pub fn resolve_address(team: &Team, address: &str) -> Result<(String, Option<Str
         .collect();
     match hits.len() {
         1 => Ok((hits[0].member.clone(), Some(hits[0].label.clone()))),
-        0 => {
-            bail!("nobody in this team is called {address:?}; list shows members and participants")
-        }
+        0 => bail!("nobody in this team is called {address:?}; list shows members and sessions"),
         _ => bail!(
             "{address:?} could be {}; say which",
             hits.iter()

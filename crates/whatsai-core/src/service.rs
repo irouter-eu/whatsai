@@ -90,8 +90,9 @@ impl Service {
             if team.members.contains_key(who) {
                 return Ok(json!({"state":"admitted","team":team}));
             }
-            // Names are how people address each other; a taken one is refused with a free one.
-            let mut taken: Vec<String> = member_handles(&team).into_values().collect();
+            // Addresses are name@fingerprint, so two Bobs cannot collide; but a bare name is the
+            // everyday form, so a taken one is still refused with a free suggestion.
+            let mut taken: Vec<String> = team.members.values().map(|m| slug(&m.name)).collect();
             let mut q = db.prepare(
                 "SELECT body FROM requests WHERE team=? AND member!=? AND state='pending' AND expires>?",
             )?;

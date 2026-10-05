@@ -266,7 +266,7 @@ impl App {
             KeyCode::Char('s') if self.team_id().is_some() => {
                 self.input = Some(Input::Recipient(String::new()));
                 self.status =
-                    "to: a person (bob), a session (bob/claude), or empty for everyone".into();
+                    "to: a person (bob, bob@1a2b3c4d), a session (bob/claude), or empty for everyone".into();
             }
             KeyCode::Char('i') if self.team_id().is_some() => {
                 match self.request(json!({"action":"invite"})) {
@@ -702,7 +702,10 @@ mod tests {
             "team list marks admin role and member count"
         );
         assert!(
-            s.contains("founder, admin") && s.contains("aurelien/codex") && s.contains("bob"),
+            s.contains("founder, admin")
+                && s.contains("aurelien@")
+                && s.contains("/codex")
+                && s.contains("bob@"),
             "{s}"
         );
         assert!(

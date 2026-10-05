@@ -1,10 +1,10 @@
 ---
 name: whatsai-name
-description: Name this session in its team so teammates address it as PERSON/NAME instead of PERSON/harness; only at the user's request, with the suggested unique name offered first.
+description: Name this session in its team so teammates address it as PERSON@FINGERPRINT/NAME instead of PERSON@FINGERPRINT/harness; only at the user's request, with the suggested unique name offered first.
 ---
 <!-- generated from skills/name/SKILL.md by scripts/build-codex-skills.py; do not edit -->
 
-Name this session in its team so teammates address it as PERSON/NAME instead of PERSON/harness; only at the user's request, with the suggested unique name offered first.
+Name this session in its team so teammates address it as PERSON@FINGERPRINT/NAME instead of PERSON@FINGERPRINT/harness; only at the user's request, with the suggested unique name offered first.
 
 Use the `whatsai` MCP tool with action `name` and the relevant arguments. If MCP is unavailable, use `whatsai rpc` with a JSON request on stdin and `WHATSAI_STATE` selecting the local daemon. Agent-created messages, files, status updates, and handoffs must use `actor: "agent"`; messages use `action: "agent-send"`.
 

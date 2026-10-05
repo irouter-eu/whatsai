@@ -7,7 +7,7 @@ if ! command -v whatsai >/dev/null 2>&1; then
 fi
 if output=$(whatsai start 2>&1); then
   name=$(basename "$PWD")
-  echo "WhatsAI daemon ready. This checkout's session is known locally as claude@${name}; in a team it is addressed as the user's name followed by /claude (or a name the user gives it). It takes part in a team only if enrolled (automatic when this directory or its Git origin is bound to one of the user's teams; otherwise the user creates or joins a team here, or runs \`whatsai agent enroll claude@${name} --into WORKSPACE\`), and in a bound checkout it is visible to the team as the user's name followed by /claude."
+  echo "WhatsAI daemon ready. This checkout's session is known locally as claude@${name}; in a team it is addressed as the user's name, @, the first eight hex digits of their key, then /claude (or a name the user gives it), as in aurelien@7d7dc33e/claude; short forms like aurelien/claude resolve while unique. It takes part in a team only if enrolled (automatic when this directory or its Git origin is bound to one of the user's teams; otherwise the user creates or joins a team here, or runs \`whatsai agent enroll claude@${name} --into WORKSPACE\`), and in a bound checkout it is visible to the team under that address."
 else
   echo "WhatsAI daemon could not start: $(printf '%s' "$output" | tail -n 1)"
 fi
