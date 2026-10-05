@@ -22,6 +22,7 @@ pub const SESSION_TTL: i64 = 45;
 
 impl Client {
     /// Attach a session to the agent for `harness` in `workspace`, creating the agent if needed.
+    /// In a checkout bound to a team the agent becomes a visible participant at once.
     pub fn attach(
         &self,
         harness: &str,
@@ -60,20 +61,19 @@ impl Client {
                 label
             }
         };
-        // A checkout that matches one of our teams is part of it unless the owner says
-        // otherwise; publishing it too is a separate opt-in.
-        if let Some(team) = self.match_workspace(Path::new(&workspace))? {
-            if self.config("auto_enroll")?.as_deref() != Some("off") {
-                self.db.execute(
-                    "UPDATE agents SET enrolled=1,team=? WHERE label=?",
-                    params![team, label],
-                )?;
-            }
-            if self.config("auto_publish")?.as_deref() == Some("team-repo") {
-                self.db.execute(
-                    "UPDATE agents SET published=1,enrolled=1,team=? WHERE label=?",
-                    params![team, label],
-                )?;
+        // A checkout bound to one of our teams is part of it, and a session there is a
+        // participant teammates can see: enrolled and published, unless the owner turned either
+        // off. Only unrelated checkouts stay private, because only bound ones match at all.
+        if let Some(team) = self.match_workspace(Path::new(&workspace))?
+            && self.config("auto_enroll")?.as_deref() != Some("off")
+        {
+            self.db.execute(
+                "UPDATE agents SET enrolled=1,team=? WHERE label=?",
+                params![team, label],
+            )?;
+            if self.config("auto_publish")?.as_deref() != Some("off") {
+                self.db
+                    .execute("UPDATE agents SET published=1 WHERE label=?", [&label])?;
             }
         }
         let lease = id();

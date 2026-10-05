@@ -223,7 +223,7 @@ enum AgentCommand {
         #[arg(value_parser = ["off", "team-repo"])]
         mode: String,
     },
-    /// Whether checkouts of the team's own repository publish themselves on attach.
+    /// Whether sessions in a checkout bound to a team are visible to it on attach (default team-repo).
     AutoPublish {
         #[arg(value_parser = ["off", "team-repo"])]
         mode: String,

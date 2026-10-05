@@ -107,8 +107,8 @@ async fn teams_bind_to_a_directory_or_a_repository_and_git_is_optional() {
         (Some(true), Some(notes_id))
     );
     assert_eq!(
-        a["published"], false,
-        "a silent attach stays private even in a matching directory"
+        a["published"], true,
+        "a session in a bound directory is a visible participant"
     );
     assert_eq!(a["team_name"], "notes");
     let b = c.attach("claude", &repo, None, None, None).unwrap()["agent"].clone();

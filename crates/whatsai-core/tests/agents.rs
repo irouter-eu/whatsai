@@ -401,7 +401,7 @@ fn version_one_databases_upgrade_in_place() {
 }
 
 #[test]
-fn publishing_is_explicit_unless_the_owner_opts_in_for_the_team_repository() {
+fn sessions_in_a_bound_checkout_are_visible_unless_the_owner_opts_out() {
     let tmp = TempDir::new().unwrap();
     let c = Client::open(tmp.path(), "Person").unwrap();
     let (_, team) = team_with(&c);
@@ -424,41 +424,33 @@ fn publishing_is_explicit_unless_the_owner_opts_in_for_the_team_repository() {
         }
     }
     let a = c.attach("claude", &ours, None, None, None).unwrap()["agent"].clone();
+    assert_eq!(a["repository"], json!(team.repository));
     assert_eq!(
-        a["repository"],
-        json!(team.repository),
-        "the checkout's origin is detected"
+        (a["enrolled"].as_bool(), a["published"].as_bool()),
+        (Some(true), Some(true)),
+        "a bound checkout is a visible participant"
     );
+    let other = c.attach("claude", &theirs, None, None, None).unwrap()["agent"].clone();
     assert_eq!(
-        a["published"], false,
-        "matching the team repository is not enough by default"
+        (other["enrolled"].as_bool(), other["published"].as_bool()),
+        (Some(false), Some(false)),
+        "an unrelated checkout stays private"
     );
-    c.agent_command(&json!({"operation":"auto-publish","mode":"team-repo"}))
+    c.agent_command(&json!({"operation":"auto-publish","mode":"off"}))
         .unwrap();
     assert!(
         c.agent_command(&json!({"operation":"auto-publish","mode":"always"}))
             .is_err()
     );
-    let b = c.attach("codex", &ours, None, None, None).unwrap()["agent"].clone();
+    let quiet = c.attach("codex", &ours, None, None, None).unwrap()["agent"].clone();
     assert_eq!(
-        b["published"], true,
-        "opted in: the team repository publishes on attach"
+        (quiet["enrolled"].as_bool(), quiet["published"].as_bool()),
+        (Some(true), Some(false)),
+        "opted out: enrolled but private"
     );
-    let other = c.attach("claude", &theirs, None, None, None).unwrap()["agent"].clone();
-    assert_eq!(
-        other["published"], false,
-        "other repositories never publish themselves"
-    );
-    let presence = c
-        .agent_presence(&TEAM.with(|t| t.borrow().clone()))
-        .unwrap();
+    let presence = c.agent_presence(&team.id).unwrap();
     assert_eq!(presence.as_array().unwrap().len(), 1);
-    assert_eq!(presence[0]["label"], "codex@ours");
-    assert_eq!(
-        c.attach("claude", &ours, None, None, None).unwrap()["agent"]["published"],
-        true,
-        "re-attaching under the opt-in publishes the first agent too"
-    );
+    assert_eq!(presence[0]["label"], "claude@ours");
 }
 
 #[tokio::test]
