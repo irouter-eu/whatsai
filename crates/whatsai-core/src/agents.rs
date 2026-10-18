@@ -405,6 +405,12 @@ impl Client {
     /// Unread counts for one agent in its team: addressed to it explicitly, and shared (to the
     /// member or to everyone) that it has not marked read yet. Own messages never count.
     pub fn unread(&self, label: &str) -> Result<Value> {
+        self.unread_after(label, None)
+    }
+    /// Unread counts as [`Self::unread`], but counting only events after `after` when that is
+    /// beyond the agent's cursor; `latest` is the newest sequence in the team, so a watcher can
+    /// hand it back as `after` and be told about each arrival once without marking anything read.
+    pub fn unread_after(&self, label: &str, after: Option<i64>) -> Result<Value> {
         let (cursor, team): (i64, Option<String>) = self
             .db
             .query_row(
@@ -420,10 +426,16 @@ impl Client {
             );
         };
         let me = self.identity.member()?.id;
+        let since = after.map_or(cursor, |a| a.max(cursor));
+        let latest: i64 = self.db.query_row(
+            "SELECT COALESCE(max(seq),0) FROM inbox WHERE team=?",
+            [&team],
+            |r| r.get(0),
+        )?;
         let count = |sql: &str| -> Result<i64> {
             Ok(self
                 .db
-                .query_row(sql, params![cursor, me, label, team], |r| r.get(0))?)
+                .query_row(sql, params![since, me, label, team], |r| r.get(0))?)
         };
         // Own messages count when another of our agents wrote them: that is how Codex asks
         // Claude on the same machine. Only what this agent wrote itself is skipped.
@@ -434,7 +446,7 @@ impl Client {
             "SELECT count(*) FROM inbox WHERE seq>?1 AND team=?4 AND NOT (json_extract(envelope,'$.signer')=?2 AND COALESCE(json_extract(event,'$.agent'),?3)=?3) AND json_extract(event,'$.to_agent') IS NULL AND (json_extract(event,'$.to') IS NULL OR json_extract(event,'$.to')=?2)",
         )?;
         Ok(
-            json!({"agent":label,"addressed":addressed,"shared":shared,"cursor":cursor,"enrolled":true,"team":team}),
+            json!({"agent":label,"addressed":addressed,"shared":shared,"cursor":cursor,"latest":latest,"enrolled":true,"team":team}),
         )
     }
     pub fn mark_read(&self, label: &str) -> Result<Value> {
@@ -527,6 +539,15 @@ impl Client {
             "show" => self.agent(field(cmd, "agent")?),
             "unread" => self.unread(&self.label_from(cmd)?),
             "mark-read" => self.mark_read(&self.label_from(cmd)?),
+            // The daemon serves `wait` outside its lock; reached directly, it answers at once.
+            "wait" => {
+                let mut unread =
+                    self.unread_after(&self.label_from(cmd)?, cmd["after"].as_i64())?;
+                let count = |k: &str| unread[k].as_i64().unwrap_or(0);
+                unread["woke"] =
+                    json!(count("addressed") > 0 || (cmd["shared"] == true && count("shared") > 0));
+                Ok(unread)
+            }
             "resolve" => Ok(
                 json!({"agent":self.resolve_agent(field(cmd,"harness")?,Path::new(field(cmd,"workspace")?))?}),
             ),

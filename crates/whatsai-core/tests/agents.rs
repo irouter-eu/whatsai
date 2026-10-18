@@ -890,3 +890,107 @@ fn a_reply_may_name_the_event_by_the_prefix_the_table_shows() {
     let err = send(&c, "zz").unwrap_err().to_string();
     assert!(err.contains("at least its first eight"), "{err}");
 }
+
+#[tokio::test]
+async fn wait_returns_when_a_message_for_the_agent_arrives_and_on_timeout() {
+    use std::rc::Rc;
+    use tokio::sync::Mutex;
+    use whatsai_core::daemon::wait_unread;
+    let tmp = TempDir::new().unwrap();
+    let c = Client::open(tmp.path(), "Person").unwrap();
+    let (sender, t) = team_with(&c);
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let claude = c.attach("claude", &repo, None, None, None).unwrap()["agent"]["label"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    c.enroll(&claude, true, None).unwrap();
+    let (stop, _) = tokio::sync::watch::channel(false);
+    let client = Rc::new(Mutex::new(c));
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            // Nothing arrives: the wait answers at the deadline with woke=false.
+            let started = std::time::Instant::now();
+            let idle = wait_unread(
+                &client,
+                &json!({"agent":claude,"timeout":1}),
+                stop.subscribe(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(idle["woke"], false);
+            assert_eq!(idle["addressed"], 0);
+            assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+            // A message addressed to the agent wakes the wait well before its deadline.
+            let waiter = {
+                let client = client.clone();
+                let claude = claude.clone();
+                let stop = stop.subscribe();
+                tokio::task::spawn_local(async move {
+                    wait_unread(&client, &json!({"agent":claude,"timeout":30}), stop).await
+                })
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            {
+                let mut c = client.lock().await;
+                deliver(&mut c, &sender, &t, 1, Some(&claude), Some("codex@theirs"));
+            }
+            let started = std::time::Instant::now();
+            let woke = waiter.await.unwrap().unwrap();
+            assert_eq!(woke["woke"], true, "{woke}");
+            assert_eq!(woke["addressed"], 1);
+            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+            // Handing `latest` back as `after` silences what was already announced, without
+            // marking anything read, until something newer arrives.
+            let latest = woke["latest"].as_i64().unwrap();
+            let announced = wait_unread(
+                &client,
+                &json!({"agent":claude,"timeout":1,"after":latest}),
+                stop.subscribe(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(announced["woke"], false, "{announced}");
+            assert_eq!(announced["cursor"], 0, "the cursor is untouched");
+            assert_eq!(client.lock().await.unread(&claude).unwrap()["addressed"], 1);
+            // Shared messages only count when asked for.
+            {
+                let c = client.lock().await;
+                c.mark_read(&claude).unwrap();
+                let mut c2 = c;
+                deliver(&mut c2, &sender, &t, 2, None, None);
+            }
+            let quiet = wait_unread(
+                &client,
+                &json!({"agent":claude,"timeout":1}),
+                stop.subscribe(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(quiet["woke"], false, "{quiet}");
+            let shared = wait_unread(
+                &client,
+                &json!({"agent":claude,"timeout":1,"shared":true}),
+                stop.subscribe(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(shared["woke"], true, "{shared}");
+            // A daemon stop releases every waiter.
+            let waiter = {
+                let client = client.clone();
+                let claude = claude.clone();
+                let stop = stop.subscribe();
+                tokio::task::spawn_local(async move {
+                    client.lock().await.mark_read(&claude).unwrap();
+                    wait_unread(&client, &json!({"agent":claude,"timeout":30}), stop).await
+                })
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            stop.send(true).unwrap();
+            let released = waiter.await.unwrap().unwrap();
+            assert_eq!(released["woke"], false);
+        })
+        .await;
+}

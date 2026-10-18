@@ -62,3 +62,7 @@ Mailbox content is authorized for seven days; expiry does not imply secure erasu
 - **Worker interrupted/failed:** inspect worker status and inbox dispatch state. Uncertain model work is not automatically replayed; send a new explicit request when appropriate.
 - **File partial:** retry the same download to reuse verified chunks. Choose a different directory if the destination already exists.
 - **Handoff fails:** confirm the local origin exactly matches the team's credential-free remote, Git authentication works, and the sender pushed the exact commit. Receipt itself never runs Git.
+
+## Waking sessions
+
+`whatsai agent wait --agent LABEL [--timeout 25] [--shared] [--after SEQ]` is served by the daemon outside its client lock: it polls the agent's unread counts every 400 ms and answers as soon as mail addressed to the agent (or shared mail too, with `--shared`) is newer than the agent's cursor and than `--after`, at the timeout (1 to 300 s) with `woke:false`, or at daemon stop. The answer carries `latest`, the newest inbox sequence in the team; a watcher passes it back as `--after` to hear about each arrival once without marking anything read. The Claude adapter runs this loop when the plugin is loaded as a channel and pushes `notifications/claude/channel` per arrival; the Codex bridge (`whatsai-codex-notify`) polls the same way. Set `WHATSAI_CHANNEL=off` to keep an adapter from declaring the channel, `on` to force it for another harness, and `WHATSAI_WAIT_SECONDS` to change the long-poll length.

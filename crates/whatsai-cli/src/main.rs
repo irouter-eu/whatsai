@@ -250,6 +250,25 @@ enum AgentCommand {
     MarkRead {
         agent: String,
     },
+    /// Block until the agent has unread messages addressed to it, or the timeout passes.
+    Wait {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, required_unless_present = "agent")]
+        harness: Option<String>,
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        /// Seconds to wait before answering with woke=false (1 to 300).
+        #[arg(long, default_value_t = 25)]
+        timeout: u64,
+        /// Also wake for messages shared with everyone, not only those addressed to this agent.
+        #[arg(long)]
+        shared: bool,
+        /// Only count events after this sequence (the `latest` of a previous answer), so a
+        /// watcher hears about each arrival once without marking anything read.
+        #[arg(long)]
+        after: Option<i64>,
+    },
 }
 #[derive(Subcommand)]
 enum WorkerCommand {
@@ -421,6 +440,16 @@ async fn main() -> anyhow::Result<()> {
             }
             AgentCommand::MarkRead { agent } => {
                 json!({"action":"agent","operation":"mark-read","agent":agent})
+            }
+            AgentCommand::Wait {
+                agent,
+                harness,
+                workspace,
+                timeout,
+                shared,
+                after,
+            } => {
+                json!({"action":"agent","operation":"wait","agent":agent,"harness":harness,"workspace":std::fs::canonicalize(workspace)?,"timeout":timeout,"shared":shared,"after":after})
             }
         },
         Command::Worker { command } => match command {

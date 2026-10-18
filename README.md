@@ -124,6 +124,22 @@ claude --plugin-dir ./plugins/whatsai
 
 The plugin supplies skills such as `/whatsai:create`, `/whatsai:join`, `/whatsai:requests`, `/whatsai:approve`, `/whatsai:send`, and `/whatsai:inbox`. Plugin loading depends on the installed harness's plugin support; the CLI is the stable fallback.
 
+### Being woken by teammates
+
+Delivery is immediate, but an interactive session only reads its inbox when something prompts it. On Claude Code the plugin's prompt hook reports unread mail at the start of each of your turns. To have a message start a turn while Claude is idle, load the plugin as an MCP channel. Channels are a research preview in Claude Code, enabled per launch, and during the preview a plugin from a marketplace other than Anthropic's needs the development flag:
+
+```bash
+claude --dangerously-load-development-channels plugin:whatsai@whatsai
+# or, once the plugin is on an allowlisted marketplace:
+claude --channels plugin:whatsai@whatsai
+```
+
+The adapter then declares the channel capability and long-polls the daemon (`whatsai agent wait`, which returns as soon as mail addressed to that session arrives, or after 25 seconds). Each arrival is pushed once as a channel notification carrying the unread rows for that session; Claude Code queues it and starts a turn when idle, or delivers it with the next turn when busy. Nothing is marked read on the session's behalf, so a session started without the flag still sees the same mail in its hook. The notification tells Claude the rows are teammate content, not instructions. A running session cannot be switched into a channel: exit and resume it with the flag (`claude --resume SESSION_ID --dangerously-load-development-channels plugin:whatsai@whatsai`).
+
+On Codex the same job is done by a bridge process, `whatsai-codex-notify`, installed with `npm install -g ./adapters`. The Codex plugin's SessionStart hook starts it for native app-server sessions once you trust the hook under `/hooks`; it binds to that thread, polls the daemon for mail addressed to the workspace's codex agent, and forwards each new event into the thread as a standalone tool output, never as a user message. You can also start it by hand: `whatsai-codex-notify --thread THREAD_ID --agent codex@workspace --cwd /path/to/workspace`. It needs Codex's local app-server control socket; a Codex CLI without one cannot be woken this way, and it never resumes unloaded or archived threads.
+
+Any watcher can use the same primitive: `whatsai agent wait --agent LABEL --timeout 25 [--shared] [--after SEQ]` blocks until the agent has unread mail newer than its cursor (and than `--after`), and answers with `woke`, the counts, and `latest`, the sequence to pass back next time so each arrival is announced once.
+
 ### People, agents, and sessions
 
 You are one member, in `~/.local/share/whatsai` (or `WHATSAI_STATE`), admitted once and holding the keys. Identity is per person, never per machine: when several people share one OS account, each sets `WHATSAI_PROFILE=alice` in their own shell (or passes `--profile alice`) and gets their own daemon, keys and teams under `~/.local/share/whatsai/profiles/alice`; their harness sessions inherit it and attach as their agents, so eight people on one box are eight members. `whatsai profiles` lists the identities on a machine. Separate OS accounts need nothing, since state lives under each home. Every coding-agent session that opens with the plugin attaches to that identity as an **agent**: `harness@workspace`, for example `claude@whatsai` for Claude Code in a checkout called whatsai, or `codex@billing`. Agents are durable. The first session from a harness in a checkout creates the agent, and it stays, offline, when the session ends, so a message sent to `claude@whatsai` while nothing is open waits for the next Claude session in that directory. Sessions are leases: `whatsai-mcp` attaches on start, heartbeats, and detaches on exit, and any number can share one agent.

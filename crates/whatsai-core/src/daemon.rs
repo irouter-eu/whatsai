@@ -60,6 +60,35 @@ pub async fn request(state: &Path, command: Value) -> Result<Value> {
     );
     Ok(v["result"].clone())
 }
+/// Block until the agent has unread messages addressed to it (or shared ones too, with
+/// `shared`) newer than its cursor and than `after`, or until `timeout` seconds pass; `woke`
+/// says which, and `latest` is the sequence to pass back as `after` next time. Polls outside
+/// the client lock so a waiting session never stalls the daemon for anyone else.
+pub async fn wait_unread(
+    client: &Rc<Mutex<Client>>,
+    command: &Value,
+    mut stop: watch::Receiver<bool>,
+) -> Result<Value> {
+    let timeout = command["timeout"].as_u64().unwrap_or(25).clamp(1, 300);
+    let shared = command["shared"] == true;
+    let after = command["after"].as_i64();
+    let label = client.lock().await.label_from(command)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
+    loop {
+        let mut unread = client.lock().await.unread_after(&label, after)?;
+        let count = |k: &str| unread[k].as_i64().unwrap_or(0);
+        let woke = count("addressed") > 0 || (shared && count("shared") > 0);
+        if woke || tokio::time::Instant::now() >= deadline {
+            unread["woke"] = json!(woke);
+            return Ok(unread);
+        }
+        tokio::select! {
+            _ = stop.changed() => { unread["woke"] = json!(false); return Ok(unread); }
+            _ = tokio::time::sleep(Duration::from_millis(400)) => {}
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
+    }
+}
 pub async fn run(state: &Path, name: &str) -> Result<()> {
     tokio::task::LocalSet::new()
         .run_until(run_local(state, name))
@@ -191,6 +220,7 @@ async fn run_local(state: &Path, name: &str) -> Result<()> {
             tokio::time::timeout(Duration::from_secs(10),BufReader::new(read.take(MAX_FRAME as u64+1)).read_line(&mut input)).await??;
             ensure!(input.len()<=MAX_FRAME,"local request too large");let command:Value=serde_json::from_str(&input)?;
             if command["action"]=="stop"{let _=stop.send(true);return Ok(json!({"state":"stopping"}));}
+            if command["action"]=="agent" && command["operation"]=="wait" {return wait_unread(&client,&command,stop.subscribe()).await;}
             client.lock().await.command(command).await
            }.await;
            let response=match result{Ok(v)=>json!({"ok":true,"result":v}),Err(e)=>json!({"ok":false,"error":format!("{e:#}")})};
