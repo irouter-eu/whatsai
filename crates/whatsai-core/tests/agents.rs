@@ -836,6 +836,39 @@ fn a_reply_may_name_the_event_by_the_prefix_the_table_shows() {
     }
     let err = send(&c, "ffffffff").unwrap_err().to_string();
     assert!(err.contains("not in local inbox"), "{err}");
+    // With no recipient at all, a reply returns to whoever wrote the original and to the
+    // agent that wrote it, instead of broadcasting.
+    let bare = c
+        .enqueue(
+            &t.id,
+            "message",
+            "agent",
+            "back to you",
+            None,
+            Some(prefix.clone()),
+            Value::Null,
+            Some(claude.clone()),
+            None,
+        )
+        .unwrap();
+    let envelope: String =
+        c.db.query_row("SELECT envelope FROM outbox WHERE id=?", [&bare], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let envelope: Signed<Sealed> = serde_json::from_str(&envelope).unwrap();
+    let event: Event = serde_json::from_slice(&c.identity.open(&envelope).unwrap()).unwrap();
+    assert_eq!(
+        event.to.as_deref(),
+        Some(them.as_str()),
+        "a bare reply is addressed to the writer"
+    );
+    assert_eq!(
+        event.to_agent.as_deref(),
+        Some("codex@theirs"),
+        "and to the agent that wrote it"
+    );
+    assert_eq!(event.reply_to.as_deref(), Some(full.as_str()));
     // A second event sharing the first eight characters makes the prefix ambiguous.
     c.db.execute(
         "INSERT INTO inbox(id,seq,event,envelope,dispatch,team) SELECT ?1,seq+1,event,envelope,dispatch,team FROM inbox WHERE id=?2",

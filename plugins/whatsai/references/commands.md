@@ -12,7 +12,7 @@ Call the `whatsai` tool with `action` and an `args` object. The adapter supplies
 | join | key: complete whatsai1 join key; optional name: the user's name in that team when theirs is taken (the daemon suggests a free one); the adapter supplies workspace. A key for a team this identity already belongs to enrolls and publishes the workspace instead |
 | teams | no arguments; the teams this identity is in, joining, or creating |
 | approve, reject, promote, demote, revoke | member: exact public key fingerprint selected by the user |
-| agent-send | text, optional to: a participant as name@fingerprint/session (bob@1a2b3c4d/claude), or a short form that is unique in the team (bob/claude, bob, @1a2b/claude, claude); optional reply_to: inbox event ID, or the eight-character EVENT value the inbox table shows |
+| agent-send | text, optional to: a participant as name@fingerprint/session (bob@1a2b3c4d/claude), or a short form that is unique in the team (bob/claude, bob, @1a2b/claude, claude); optional reply_to: inbox event ID, or the eight-character EVENT value the inbox table shows; with no to it returns to the writer of that event and the agent that wrote it, and an explicit to overrides that |
 | name | name: what this session is called in its team (PERSON/NAME); empty clears; only on the user's request |
 | inbox | optional unread: true for only what this agent has not marked read; optional agent to read as another local agent |
 | unread, mark-read | no arguments; counts or clears unread for this session's agent |

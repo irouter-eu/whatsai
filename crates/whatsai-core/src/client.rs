@@ -685,20 +685,29 @@ impl Client {
 
     // ---------------------------------------------------------------- events
     /// Find one inbox event by its full ID or a unique prefix of at least eight characters,
-    /// returning the full ID, the stored event, and its team.
-    fn inbox_event(&self, reference: &str) -> Result<(String, String, Option<String>)> {
+    /// returning the full ID, the stored event, its team, and who sent it.
+    fn inbox_event(&self, reference: &str) -> Result<(String, Event, Option<String>, String)> {
         ensure!(
             reference.len() >= 8 && reference.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
             "reply target must be an event ID or at least its first eight characters"
         );
-        let mut q = self
-            .db
-            .prepare("SELECT id,event,team FROM inbox WHERE id=?1 OR id LIKE ?1||'%' LIMIT 2")?;
-        let rows: Vec<(String, String, Option<String>)> = q
-            .query_map([reference], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        let mut q = self.db.prepare(
+            "SELECT id,event,team,envelope FROM inbox WHERE id=?1 OR id LIKE ?1||'%' LIMIT 2",
+        )?;
+        let rows: Vec<(String, String, Option<String>, String)> = q
+            .query_map([reference], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
             .collect::<std::result::Result<_, _>>()?;
         match rows.len() {
-            1 => Ok(rows.into_iter().next().unwrap()),
+            1 => {
+                let (full, event, team, envelope) = rows.into_iter().next().unwrap();
+                let sender = serde_json::from_str::<Signed<Sealed>>(&envelope)?
+                    .body
+                    .header
+                    .sender;
+                Ok((full, serde_json::from_str(&event)?, team, sender))
+            }
             0 => bail!("reply target is not in local inbox: {reference}"),
             _ => bail!("reply target {reference} matches several inbox events; use the full ID"),
         }
@@ -724,6 +733,29 @@ impl Client {
         let own_agent = |label: &str| {
             self.agent(label)
                 .is_ok_and(|a| a["team"] == team && a["enrolled"] == true && a["retired"] != true)
+        };
+        // A reply names its target by full event ID or by the prefix tables show. With no
+        // explicit recipient it returns to whoever wrote the original, and to the agent that
+        // wrote it; an explicit `to` or `to_agent` overrides that.
+        let (reply_to, root, to, to_agent) = match &reply_to {
+            Some(reference) => {
+                let (full, original, reply_team, sender) = self.inbox_event(reference)?;
+                ensure!(
+                    reply_team.as_deref() == Some(team),
+                    "reply target belongs to another team"
+                );
+                let to_agent = match &to {
+                    None => to_agent.or(original.agent),
+                    Some(_) => to_agent,
+                };
+                (
+                    Some(full),
+                    Some(original.root),
+                    to.or(Some(sender)),
+                    to_agent,
+                )
+            }
+            None => (None, None, to, to_agent),
         };
         // `to` may be a fingerprint, a display name, an agent label, or `name/label`.
         let (to, to_agent) = match to {
@@ -770,17 +802,7 @@ impl Client {
             );
         }
         let eid = id();
-        // Tables show the first eight characters of an event ID, so a reply may name a prefix.
-        let (reply_to, root) = if let Some(reply) = &reply_to {
-            let (full, value, reply_team) = self.inbox_event(reply)?;
-            ensure!(
-                reply_team.as_deref() == Some(team),
-                "reply target belongs to another team"
-            );
-            (Some(full), serde_json::from_str::<Event>(&value)?.root)
-        } else {
-            (None, eid.clone())
-        };
+        let root = root.unwrap_or_else(|| eid.clone());
         let event = Event {
             actor: actor.into(),
             text: text.into(),
