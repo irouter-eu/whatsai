@@ -780,3 +780,64 @@ fn my_own_enrolled_agents_reach_each_other_without_publishing() {
     assert_eq!(c.unread(&claude).unwrap()["addressed"], 3);
     assert_eq!(c.unread(&codex).unwrap()["addressed"], 0);
 }
+
+#[test]
+fn a_reply_may_name_the_event_by_the_prefix_the_table_shows() {
+    let tmp = TempDir::new().unwrap();
+    let mut c = Client::open(tmp.path(), "Person").unwrap();
+    let (sender, t) = team_with(&c);
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let claude = c.attach("claude", &repo, None, None, None).unwrap()["agent"]["label"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    c.enroll(&claude, true, None).unwrap();
+    deliver(&mut c, &sender, &t, 1, Some(&claude), Some("codex@theirs"));
+    let (full, root): (String, String) =
+        c.db.query_row("SELECT id,event FROM inbox LIMIT 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    let root = serde_json::from_str::<Event>(&root).unwrap().root;
+    let prefix = full.chars().take(8).collect::<String>();
+    let them = sender.member().unwrap().id;
+    let send = |c: &Client, reply: &str| {
+        c.enqueue(
+            &t.id,
+            "message",
+            "agent",
+            "on it",
+            Some(them.clone()),
+            Some(reply.to_owned()),
+            Value::Null,
+            Some(claude.clone()),
+            Some("codex@theirs".into()),
+        )
+    };
+    for reference in [full.as_str(), prefix.as_str()] {
+        let eid = send(&c, reference).unwrap();
+        let envelope: String =
+            c.db.query_row("SELECT envelope FROM outbox WHERE id=?", [&eid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let envelope: Signed<Sealed> = serde_json::from_str(&envelope).unwrap();
+        let event: Event = serde_json::from_slice(&c.identity.open(&envelope).unwrap()).unwrap();
+        assert_eq!(
+            event.reply_to.as_deref(),
+            Some(full.as_str()),
+            "{reference}"
+        );
+        assert_eq!(
+            event.root, root,
+            "a prefixed reply threads under the same root"
+        );
+    }
+    let err = send(&c, "ffffffff").unwrap_err().to_string();
+    assert!(err.contains("not in local inbox"), "{err}");
+    let err = send(&c, "abc").unwrap_err().to_string();
+    assert!(err.contains("at least its first eight"), "{err}");
+    let err = send(&c, "zz").unwrap_err().to_string();
+    assert!(err.contains("at least its first eight"), "{err}");
+}

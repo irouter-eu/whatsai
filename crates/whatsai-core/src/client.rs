@@ -684,6 +684,25 @@ impl Client {
     }
 
     // ---------------------------------------------------------------- events
+    /// Find one inbox event by its full ID or a unique prefix of at least eight characters,
+    /// returning the full ID, the stored event, and its team.
+    fn inbox_event(&self, reference: &str) -> Result<(String, String, Option<String>)> {
+        ensure!(
+            reference.len() >= 8 && reference.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "reply target must be an event ID or at least its first eight characters"
+        );
+        let mut q = self
+            .db
+            .prepare("SELECT id,event,team FROM inbox WHERE id=?1 OR id LIKE ?1||'%' LIMIT 2")?;
+        let rows: Vec<(String, String, Option<String>)> = q
+            .query_map([reference], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        match rows.len() {
+            1 => Ok(rows.into_iter().next().unwrap()),
+            0 => bail!("reply target is not in local inbox: {reference}"),
+            _ => bail!("reply target {reference} matches several inbox events; use the full ID"),
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
         &self,
@@ -751,20 +770,16 @@ impl Client {
             );
         }
         let eid = id();
-        let root = if let Some(reply) = &reply_to {
-            let (value, reply_team): (String, Option<String>) = self
-                .db
-                .query_row("SELECT event,team FROM inbox WHERE id=?", [reply], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
-                .context("reply target is not in local inbox")?;
+        // Tables show the first eight characters of an event ID, so a reply may name a prefix.
+        let (reply_to, root) = if let Some(reply) = &reply_to {
+            let (full, value, reply_team) = self.inbox_event(reply)?;
             ensure!(
                 reply_team.as_deref() == Some(team),
                 "reply target belongs to another team"
             );
-            serde_json::from_str::<Event>(&value)?.root
+            (Some(full), serde_json::from_str::<Event>(&value)?.root)
         } else {
-            eid.clone()
+            (None, eid.clone())
         };
         let event = Event {
             actor: actor.into(),
