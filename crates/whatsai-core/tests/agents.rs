@@ -836,6 +836,22 @@ fn a_reply_may_name_the_event_by_the_prefix_the_table_shows() {
     }
     let err = send(&c, "ffffffff").unwrap_err().to_string();
     assert!(err.contains("not in local inbox"), "{err}");
+    // A second event sharing the first eight characters makes the prefix ambiguous.
+    c.db.execute(
+        "INSERT INTO inbox(id,seq,event,envelope,dispatch,team) SELECT ?1,seq+1,event,envelope,dispatch,team FROM inbox WHERE id=?2",
+        [format!("{prefix}-twin"), full.clone()],
+    )
+    .unwrap();
+    let err = send(&c, &prefix).unwrap_err().to_string();
+    assert!(
+        err.contains("matches several") && err.contains("full ID"),
+        "{err}"
+    );
+    assert_eq!(
+        send(&c, &full).unwrap().len(),
+        36,
+        "the full ID still resolves"
+    );
     let err = send(&c, "abc").unwrap_err().to_string();
     assert!(err.contains("at least its first eight"), "{err}");
     let err = send(&c, "zz").unwrap_err().to_string();
